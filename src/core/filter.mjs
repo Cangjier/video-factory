@@ -31,6 +31,182 @@ export class FilterError extends Error {
 }
 
 /**
+ * Build the chroma-key fragment that makes one colour transparent.
+ *
+ * This is the zero-cost half of background replacement: a green screen or any flat-colour
+ * backdrop needs no model at all, and `colorkey` runs at essentially the speed of the decode.
+ * The learned-matting route (see `video_analyze {action:"matte"}`) is only needed when the
+ * backdrop is not a flat colour.
+ *
+ * `colorkey` rather than `chromakey`: both exist in this build, but `chromakey` measures in YUV
+ * and `colorkey` in RGB, and a plan specifies its key in RGB hex. Matching the space the caller
+ * thinks in avoids a conversion step whose error would be invisible but real.
+ *
+ * **The defaults are conservative on purpose.** The similarity is a distance in RGB, so its
+ * useful value depends on the footage — lighting, spill, and compression all move it.
+ * Calibration against a synthetic plate showed a wide range of values that separate cleanly,
+ * which means a synthetic plate cannot pick the right one; only real footage can. So the default
+ * errs toward keeping too much rather than eating the subject, and
+ * {@link chromaKeyValues} reports the resolved number so it can be tuned against a real frame.
+ *
+ * `despill` is on by default because green light bounces onto the subject and leaves a fringe
+ * that survives the key; removing the key without removing the spill looks like a bad cutout
+ * even when the alpha is perfect.
+ *
+ * @param {object} key - `{ color, similarity, blend, spill }`.
+ * @returns {string} the filter fragment, or `''` when no key is configured.
+ * @throws {FilterError} when a value is out of range or the colour is malformed.
+ */
+export function chromaKeyFilter(key) {
+  if (key === undefined || key === null) return ''
+  const values = chromaKeyValues(key)
+
+  const parts = [`colorkey=${values.color}:${values.similarity}:${values.blend}`]
+  // `despill` needs to know which channel is the screen, which is a property of the key colour
+  // rather than of the footage: green screens spill green, blue screens spill blue.
+  if (values.despill) parts.push(`despill=type=${values.spillType}`)
+  return parts.join(',')
+}
+
+/**
+ * Resolve and validate a chroma-key block into the numbers the filter will actually use.
+ *
+ * Split out from {@link chromaKeyFilter} so a caller — or a test — can see the resolved values
+ * without parsing the filter string, and so the tool can report exactly what it applied.
+ *
+ * @param {object} key - `{ color, similarity, blend, spill }`.
+ * @returns {{color: string, inputColor: string, similarity: number, blend: number, despill: boolean, spillType: string}} the resolved settings.
+ * @throws {FilterError} when a value is out of range.
+ */
+export function chromaKeyValues(key) {
+  const inputColor = key.color === undefined || key.color === null ? '#00B140' : String(key.color)
+  const color = toFfmpegColor(inputColor)
+  const similarity = rangeField(key.similarity, 'chromaKey.similarity', 0.01, 1, 0.3)
+  const blend = rangeField(key.blend, 'chromaKey.blend', 0, 1, 0.1)
+  if (similarity + blend > 1) {
+    throw new FilterError(
+      `chromaKey: similarity (${similarity}) + blend (${blend}) must not exceed 1; ` +
+        'together they are the full distance range, so a sum above 1 has no meaning',
+    )
+  }
+  return {
+    color,
+    inputColor,
+    similarity,
+    blend,
+    // `spill` is accepted as an alias for `despill` so the plan field reads naturally either way.
+    despill: key.despill === undefined ? key.spill === undefined ? true : Boolean(key.spill) : Boolean(key.despill),
+    spillType: spillTypeOf(inputColor),
+  }
+}
+
+/**
+ * Which channel `despill` should pull down, inferred from the key colour.
+ *
+ * A green screen spills green and a blue screen spills blue. Inferring it from the key means a
+ * caller cannot accidentally leave blue spill on a green key, which is the failure that makes a
+ * cutout look wrong in a way that is hard to name.
+ *
+ * @param {string} color - the key colour, `#RRGGBB` or `#RGB`.
+ * @returns {'green'|'blue'} the channel to despill.
+ */
+function spillTypeOf(color) {
+  const text = String(color).trim().replace(/^#/, '')
+  const expanded = text.length === 3 ? text.split('').map((c) => c + c).join('') : text
+  const red = parseInt(expanded.slice(0, 2), 16)
+  const green = parseInt(expanded.slice(2, 4), 16)
+  const blue = parseInt(expanded.slice(4, 6), 16)
+  // Whichever of green/blue dominates is the screen; green wins a tie, which only happens on a
+  // colour that is neither, and there green is the more common intent.
+  return blue > green ? 'blue' : 'green'
+}
+
+/**
+ * Build the two-input fragment that keys a source and lays it over a solid background.
+ *
+ * A key on its own produces transparency, and a scene that ends in `format=yuv420p` discards it —
+ * so `colorkey` by itself changes nothing visible. Replacement only happens when the keyed source
+ * is composited onto something, which is why the background is part of this fragment rather than
+ * a separate step.
+ *
+ * The order is load-bearing: key into RGBA **first**, then `overlay`. Compositing an opaque
+ * frame and keying afterwards has nothing left to key against the background.
+ *
+ * The background is generated with `lavfi` here rather than supplied as a second input, which
+ * keeps the scene a single-input graph. An image or video background needs a real second input
+ * and therefore a change to how `sceneArguments` builds its argument list; that is deliberately
+ * not done here so this half can land without touching the render contract.
+ *
+ * @param {object} key - `{ color, similarity, blend, spill, background }`.
+ * @param {number} width - canvas width.
+ * @param {number} height - canvas height.
+ * @param {number} fps - output frame rate.
+ * @param {number} duration - the scene's length in seconds.
+ * @returns {{input: string[], video: string, label: string}} the background input args and the
+ *   filter fragment, or null when no background was requested.
+ * @throws {FilterError} when the background is not a colour.
+ */
+export function chromaKeyComposite(key, width, height, fps, duration) {
+  if (key === undefined || key === null) return null
+  const background = key.background
+  if (background === undefined || background === null || background === '') return null
+  if (typeof background !== 'string') {
+    throw new FilterError(
+      `chromaKey.background: expected a hex colour for now, got ${typeof background}. ` +
+        'An image or video background needs a second input and is not supported yet.',
+    )
+  }
+  if (background.includes('/') || background.includes('\\') || background.includes('.')) {
+    throw new FilterError(
+      `chromaKey.background: '${background}' looks like a file path, but only a hex colour is ` +
+        'supported. An image or video background needs a second input and is not supported yet.',
+    )
+  }
+
+  const keyFilter = chromaKeyFilter(key)
+  if (keyFilter === '') throw new FilterError('chromaKeyComposite needs a key, but none was configured')
+  const color = toFfmpegColor(background)
+  const seconds = Number(duration)
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new FilterError(`chromaKeyComposite needs a positive scene duration, got ${JSON.stringify(duration)}`)
+  }
+
+  return {
+    // ffmpeg wants an input's options before its `-i`, so these are prefixed rather than
+    // appended: `['-f','lavfi','-i',…]` is a complete input specification, not trailing flags.
+    //
+    // `-t` is not optional. A `lavfi` source is infinite by default, and an infinite second input
+    // to `overlay` makes the graph emit frames forever; the picture was then capped by the
+    // output `-t` but the audio ran out, and the render died inside the AAC encoder with
+    // "Error submitting audio frame to the encoder" — a message that says nothing about the
+    // real cause. A finite colour source is what keeps the graph's ends together.
+    input: ['-f', 'lavfi', '-t', seconds.toFixed(3), '-i', `color=c=${color}:s=${width}x${height}:r=${fps.toFixed(6)}`],
+    // The keyed frame must reach `overlay` with its alpha intact, hence `format=rgba` after the
+    // key and no pixel-format conversion before the overlay.
+    video: `[0:v]${keyFilter},format=rgba[ckfg];[1:v]format=rgba[ckbg];[ckbg][ckfg]overlay=0:0:format=auto`,
+    label: 'ck',
+  }
+}
+/**
+ * Read an optional number within a range, falling back to a default.
+ * @param {*} value - the candidate.
+ * @param {string} where - field name for the error message.
+ * @param {number} minimum - inclusive lower bound.
+ * @param {number} maximum - inclusive upper bound.
+ * @param {number} fallback - used when the value is absent.
+ * @returns {number} the validated number.
+ * @throws {FilterError} when the value is present but unusable.
+ */
+function rangeField(value, where, minimum, maximum, fallback) {
+  if (value === undefined || value === null) return fallback
+  const number = Number(value)
+  if (!Number.isFinite(number) || number < minimum || number > maximum) {
+    throw new FilterError(`${where}: expected a number between ${minimum} and ${maximum}, got ${JSON.stringify(value)}`)
+  }
+  return number
+}
+
+/**
  * Convert `#RRGGBB` into the `0xRRGGBB` form ffmpeg accepts.
  * @param {string} color - a hex colour, with or without the leading `#`.
  * @returns {string} the ffmpeg colour literal.

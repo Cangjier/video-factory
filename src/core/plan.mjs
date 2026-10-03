@@ -120,6 +120,42 @@ function enumField(value, allowed, where, label) {
 }
 
 /**
+ * Parse a scene's chroma-key block.
+ *
+ * Returns `null` when absent, which is what {@link module:video-factory/core/filter.chromaKeyFilter}
+ * expects for "no key". Validation of the numbers lives in the filter module, because that is
+ * where they are consumed and where the resolved values are reported; duplicating the ranges
+ * here would create two places to change and one of them would eventually be missed.
+ *
+ * @param {object|undefined} raw - the decoded block.
+ * @param {string} where - location used in the error message.
+ * @returns {object|null} the block, or null when the scene is not keyed.
+ */
+function parseChromaKey(raw, where) {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new PlanError(`${where}: expected an object like { color, similarity, blend, spill }`)
+  }
+  const block = {
+    color: raw.color === undefined || raw.color === null ? '#00B140' : String(raw.color),
+    similarity: raw.similarity === undefined ? undefined : numberField(raw.similarity, `${where}.similarity`, 0.01, 1),
+    blend: raw.blend === undefined ? undefined : numberField(raw.blend, `${where}.blend`, 0, 1),
+    spill: raw.spill === undefined ? undefined : Boolean(raw.spill),
+    despill: raw.despill === undefined ? undefined : Boolean(raw.despill),
+    // A key without a background produces transparency that the render drops on the floor, so
+    // this is the field that makes the feature do anything. It is optional because a caller may
+    // want the keyed frame for a later step instead.
+    background: raw.background === undefined || raw.background === null ? null : String(raw.background),
+  }
+  if (block.similarity !== undefined && block.blend !== undefined && block.similarity + block.blend > 1) {
+    throw new PlanError(
+      `${where}: similarity (${block.similarity}) + blend (${block.blend}) must not exceed 1`,
+    )
+  }
+  return block
+}
+
+/**
  * Parse one text overlay.
  * @param {object} raw - the decoded overlay.
  * @param {string} where - location used in the error message.
@@ -218,6 +254,7 @@ function parseScene(raw, index) {
     motion: raw.motion === undefined ? 'none' : enumField(raw.motion, MOTION_TYPES, `${where}.motion`, 'motion'),
     transition: parseTransition(raw.transition, `${where}.transition`),
     fit: raw.fit === undefined ? 'cover' : enumField(raw.fit, FIT_TYPES, `${where}.fit`, 'fit'),
+    chromaKey: parseChromaKey(raw.chroma_key ?? raw.chromaKey, `${where}.chroma_key`),
     start: raw.start === undefined ? 0 : numberField(raw.start, `${where}.start`, 0),
     speed: raw.speed === undefined ? 1 : numberField(raw.speed, `${where}.speed`, 0.1, 10),
     volume: raw.volume === undefined ? 1 : numberField(raw.volume, `${where}.volume`, 0, 4),

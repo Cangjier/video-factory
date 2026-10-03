@@ -178,6 +178,38 @@ video_analyze {action: "sample_frames", target: "out/final.mp4", extract: true}
 
 ---
 
+## 纯色背景替换（绿幕）
+
+**不需要任何模型。** 纯色背板直接走 ffmpeg `colorkey`，开销基本只有解码。只有背景**不是**纯色时，才需要 `video_analyze {action:"matte"}` 那条学习式路径。
+
+```jsonc
+{
+  "id": "s01", "kind": "image", "source": "material/主持人口播.jpg",
+  "chroma_key": {
+    "color": "#00B140",      // 要抠掉的颜色
+    "similarity": 0.3,       // 越大抠得越狠
+    "blend": 0.1,            // 边缘过渡
+    "background": "#102040", // 替换背景（目前仅纯色）
+    "spill": true            // 去溢色：绿幕反光留在主体边缘的绿边
+  }
+}
+```
+
+**必须给 `background`**，否则看不出效果：抠像产生的是 alpha，而镜头最后会转成 `yuv420p`，alpha 在那一步被丢弃。没有背景可合成时，滤镜等于没生效。
+
+去溢色的通道由 `color` **自动推断**（绿幕去绿、蓝幕去蓝），所以不会出现"绿幕配蓝色去溢色"这种错配。
+
+实测（1920×1080，30 fps）：绿幕完全消失，主体完整保留，背景正确铺上。
+
+| 限制 | 说明 |
+| --- | --- |
+| 与 `overlays[]` 不能同时用 | 合成会把滤镜图拆成多段并引入第二个输入，文字叠加需要另接一段。组合使用**直接报错**，而不是产出一张时序错误的图 |
+| 背景仅支持纯色 | 图片/视频背景需要第二个输入，尚未实现 |
+
+**默认值偏保守**，这是刻意的：`similarity` 是 RGB 距离，有用值取决于布光、溢色和压缩。我拿合成板标定过，发现**一大段取值都能完美分离**——也就是说合成板根本选不出正确值，只有真实素材能。所以默认宁可多留一点，也不要把主体吃掉，并把实际生效的数值回报出来供你对着真实帧调。
+
+---
+
 ## DSH 能"看懂"一条视频吗？
 
 能看画面，也能识别声音类别了。但有几件事仍然做不到，分开说清楚：
@@ -306,6 +338,9 @@ vendor/audio/          YAMNet 模型 + WASM 推理运行时（可选；装之前
 | 常驻 OCR 引擎拖住进程 | 短命脚本会等空闲计时器（120 s）才退出 | 插件卸载时 `disposeOcrSessions()`，测试与 CLI 显式释放 |
 | **系统代理对 Node 不可见** | `install_*` 从插件里报 `fetch failed`，但同一个 URL 在 PowerShell 里 **1.4 秒就取到**。Node 的 `fetch` 既不读 Windows 注册表代理，也不认 `HTTPS_PROXY`（Node 24 实测：设了变量、加了 `NODE_USE_ENV_PROXY=1`，仍然直连超时）。而 `Invoke-WebRequest`、浏览器、其它 Windows 程序都走注册表代理 | 自己读注册表 `ProxyEnable`/`ProxyServer`，用 `http CONNECT` + `tls` 建隧道；`undici` 在 Node 24 里**不可导入**，所以只能用内置模块手写 |
 | 代理下漏掉重定向 | HF 的 `/resolve/` 返回 **307/302** 跳 CDN。第一版 `httpFetch` 不跟重定向，于是把 278 字节的 "Temporary Redirect" 页面当成模型下载并去校验哈希 | 跟随重定向（上限 8 跳），并在每跳后排空响应体 |
+| **静音时间线让 `loudnorm` 产出 NaN** | 没有配音也没有音乐的 plan 在最后一步失败：`[aac] Input contains (near) NaN/+-Inf`。报错只说编码器，**完全没提响度**，靠逐段二分才定位到 `loudnorm`。此前**任何空音频块的 plan 都渲染不出成片** | 静音源跳过 `loudnorm`（静音没有响度可归一），只固定编码器要的采样格式。回归测试 `tests/finalize.test.mjs`（已回退验证过它真的会失败） |
+| **`lavfi` 源默认无限长** | 抠像背景输入不加 `-t` 时 `overlay` 无休止产帧；画面被输出 `-t` 截住而音频耗尽，又死在 AAC 编码器上，报的还是 NaN | 背景输入按镜头时长加 `-t` |
+| **`-v error` 把测量一起静音** | `signalstats` / `metadata=print` 走日志系统，`-v error` 下 `spawnSync` 拿回空字符串，看起来像"没有数据" | 需要测量时用 `-v info` |
 
 完整清单见 `docs/插件设计规格.md` §5.3 与 §12.1（后者的教训：**能用纯函数离线验证的，先在本地测到全绿再打真实服务**）。
 

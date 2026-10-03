@@ -20,7 +20,7 @@
 import { copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { FFmpegError, run } from './ffmpeg.mjs'
-import { applyOverlays, atempoChain, fitFilters, motionFilters, toFfmpegColor } from './filter.mjs'
+import { applyOverlays, atempoChain, chromaKeyComposite, fitFilters, motionFilters, toFfmpegColor } from './filter.mjs'
 import { probe } from './probe.mjs'
 import { fontDirectories } from './env.mjs'
 
@@ -171,14 +171,15 @@ export async function sceneArguments(scene, plan, options) {
       chain +
       `,setsar=1,fps=${fps.toFixed(6)},trim=duration=${duration.toFixed(3)},` +
       'setpts=PTS-STARTPTS,setrange=tv,format=yuv420p'
+    const keyed = keyedChain([...inputs], full, scene.chromaKey, width, height, fps, duration, scene.overlays.length > 0)
+    const imageChain = keyed.prefixed ? keyed.chain : `[0:v]${keyed.chain}`
     return {
-      inputs,
-      video: `[0:v]${applyOverlays(full, scene.overlays, overlayContext)}[v]`,
+      inputs: keyed.inputs,
+      video: `${applyOverlays(imageChain, scene.overlays, overlayContext)}[v]`,
       audio: `anullsrc=channel_layout=stereo:sample_rate=48000:duration=${duration.toFixed(3)}[a]`,
       tail,
     }
   }
-
   // Video source.
   const info = options.info ?? (await probe(source, options.config ?? {}))
   const sourceDuration = info.duration
@@ -195,7 +196,9 @@ export async function sceneArguments(scene, plan, options) {
   chain +=
     `,setsar=1,fps=${fps.toFixed(6)},trim=duration=${duration.toFixed(3)},` +
     'setpts=PTS-STARTPTS,setrange=tv,format=yuv420p'
-  const video = `[0:v]${applyOverlays(chain, scene.overlays, overlayContext)}[v]`
+  const keyed = keyedChain([...inputs], chain, scene.chromaKey, width, height, fps, duration, scene.overlays.length > 0)
+  const videoChain = keyed.prefixed ? keyed.chain : `[0:v]${keyed.chain}`
+  const video = `${applyOverlays(videoChain, scene.overlays, overlayContext)}[v]`
 
   let audio
   if (scene.muted || !info.hasAudio) {
@@ -211,7 +214,77 @@ export async function sceneArguments(scene, plan, options) {
     audio = `[0:a]${audioChain}[a]`
   }
 
-  return { inputs, video, audio, tail }
+  return { inputs: keyed.inputs, video, audio, tail }
+}
+
+/**
+ * Fold a scene's chroma key into its video chain, adding the background input when there is one.
+ *
+ * Split out because both the still and the moving-picture branch need exactly this, and getting
+ * it subtly different between them is how one of the two ends up silently unkeyed.
+ *
+ * Two details matter here and are easy to get wrong:
+ *
+ * 1. The background is **input 1**, so it must be appended after the scene's own input. The
+ *    scene's audio stream is then still `[0:a]`, which is what the rest of this module assumes.
+ * 2. The returned chain is a **complete** filter string that begins with `[0:v]` and ends on
+ *    `[v]`'s producer pads, because compositing introduces extra `;`-separated chains. Callers
+ *    must not prepend `[0:v]` again.
+ *
+ * A key with no background is a deliberate no-op here: the key would produce alpha that the
+ * scene's `format=yuv420p` discards, so pretending to apply it would be worse than not applying
+ * it. `diagnose` reports that combination instead.
+ *
+ * @param {string[]} inputs - the scene's existing input arguments, mutated in place.
+ * @param {string} chain - the scene's video filter chain, beginning after `[0:v]`.
+ * @param {object|null} chromaKey - the scene's validated key block.
+ * @param {number} width - canvas width.
+ * @param {number} height - canvas height.
+ * @param {number} fps - output frame rate.
+ * @param {boolean} [hasOverlays] - whether the scene also draws text.
+ * @returns {{inputs: string[], chain: string, prefixed: boolean}} the inputs and the chain;
+ *   `prefixed` reports whether the chain already carries its `[0:v]` label.
+ * @throws {BuildError} when a background was configured but cannot be built, or when it is
+ *   combined with text overlays, which this filter graph cannot express.
+ */
+function keyedChain(inputs, chain, chromaKey, width, height, fps, duration, hasOverlays = false) {
+  if (chromaKey === null || chromaKey === undefined) return { inputs, chain, prefixed: false }
+  let composite
+  try {
+    composite = chromaKeyComposite(chromaKey, width, height, fps, duration)
+  } catch (error) {
+    throw new BuildError(`镜头 chroma_key：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (composite === null) return { inputs, chain, prefixed: false }
+
+  if (hasOverlays) {
+    // `applyOverlays` joins its fragments with commas, but a composite is several `;`-separated
+    // chains that read from a second input. Appending `drawtext` to the composite's tail would
+    // attach it to the background branch while the timing expressions still refer to the whole
+    // scene, which renders text at the wrong time over the wrong stream. Refusing is better than
+    // emitting a graph that is syntactically valid and semantically wrong.
+    throw new BuildError(
+      `镜头 chroma_key：暂不支持与 overlays 同时使用。` +
+        '合成会把滤镜图拆成多段并引入第二个输入，文字叠加需要另接一段，目前尚未实现。' +
+        '请把文字放到未抠像的镜头，或先只保留 chroma_key。',
+    )
+  }
+
+  inputs.push(...composite.input)
+
+  // The scene chain ends in `format=yuv420p`, which would throw away the alpha the key produces.
+  // It is stripped here and re-applied after the overlay, so the scene's own processing still
+  // finishes in the pixel format the rest of the pipeline expects.
+  const OPAQUE = ',format=yuv420p'
+  const opaqueTail = chain.endsWith(OPAQUE) ? OPAQUE : ''
+  const body = opaqueTail === '' ? chain : chain.slice(0, -OPAQUE.length)
+
+  const [foreground, ...rest] = composite.video.split(';')
+  // `[0:v]colorkey=…,format=rgba[ckfg];…` becomes `[0:v]<body>,colorkey=…` — the scene's own
+  // processing runs before the key, so the key sees the fitted, retimed frame, not the raw source.
+  const keyedForeground = foreground.replace('[0:v]', `[0:v]${body},`)
+  const composed = [keyedForeground, ...rest].join(';')
+  return { inputs, chain: `${composed}${opaqueTail}`, prefixed: true }
 }
 
 /**
