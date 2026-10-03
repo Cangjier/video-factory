@@ -56,3 +56,6 @@ components/vhfkey/driver/*.sys
 **/narration/voiceover.mp3
 **/narration/voiceover.words.json
 **/narration/voiceover.cues.json
+
+# Driver install log: records this machine's device state and is regenerated on every run.
+components/vhfkey/device-node.log

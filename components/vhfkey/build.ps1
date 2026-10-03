@@ -1,4 +1,4 @@
-# Build the virtual HID keyboard: the kernel driver and its user-mode client.
+﻿# Build the virtual HID keyboard: the kernel driver and its user-mode client.
 #
 # Sources of the toolchain, each from where it actually lives rather than from a Visual Studio install:
 #   compiler and linker   C:\BuildTools (VS Build Tools, installed separately)
@@ -192,7 +192,13 @@ $kmdfLib = Join-Path $wdkRoot ("Lib\wdf\kmdf\x64\" + $wdfVersion.Name)
 if (-not (Test-Path $kmdfLib)) { throw "KMDF library directory not found: $kmdfLib" }
 Write-Output "  kmdf lib:    $kmdfLib"
 $linkArgs = @(
-  '/nologo', '/DRIVER', '/SUBSYSTEM:NATIVE', '/ENTRY:DriverEntry',
+  # /DRIVER implies the entry point and the subsystem, but it does not set the DLL characteristic, and
+  # a kernel driver must be a DLL. Without /DLL the image links as an EXECUTABLE IMAGE with
+  # characteristics 0x22 rather than 0x2022, and the loader takes the wrong path for it. The symptom is
+  # a bugcheck 0x7E — SYSTEM_THREAD_EXCEPTION_NOT_HANDLED with an access violation — the moment the
+  # driver package is installed, before any device node exists. Dumpbin names it plainly:
+  # "File Type: EXECUTABLE IMAGE". This cost four machine crashes to find, so it is spelled out here.
+  '/nologo', '/DRIVER', '/DLL', '/SUBSYSTEM:NATIVE', '/ENTRY:DriverEntry',
   "/LIBPATH:$kmLib",
   "/LIBPATH:$kmdfLib",
   "/LIBPATH:$msvcLib",
@@ -225,6 +231,37 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path $sys)) {
 }
 $sysInfo = Get-Item $sys
 Write-Output "  ✅ $($sysInfo.FullName)  $([math]::Round($sysInfo.Length/1KB,1)) KB"
+
+# ---------------------------------------------------------------------------------------------
+Step '3b. verify the image is a loadable kernel driver'
+# ---------------------------------------------------------------------------------------------
+# These properties are checked here rather than discovered by loading the driver, because the failure
+# mode is a machine crash rather than an error message. Each one is read straight out of the PE header,
+# so the check needs no debugging tools.
+$image = [System.IO.File]::ReadAllBytes($sys)
+$peOffset = [BitConverter]::ToInt32($image, 0x3C)
+$machine = [BitConverter]::ToUInt16($image, $peOffset + 4)
+$subsystem = [BitConverter]::ToUInt16($image, $peOffset + 0x5C)
+$characteristics = [BitConverter]::ToUInt16($image, $peOffset + 0x16)
+
+$problems = @()
+if ($machine -ne 0x8664) { $problems += "machine is 0x$($machine.ToString('X4')), expected 0x8664 (x64)" }
+if ($subsystem -ne 1) { $problems += "subsystem is $subsystem, expected 1 (native)" }
+if (-not ($characteristics -band 0x2000)) {
+  $problems += "IMAGE_FILE_DLL (0x2000) is not set — characteristics are 0x$($characteristics.ToString('X4')); a kernel driver must link with /DLL"
+}
+
+Write-Output "  machine:         0x$($machine.ToString('X4'))"
+Write-Output "  subsystem:       $subsystem"
+Write-Output "  characteristics: 0x$($characteristics.ToString('X4'))  (0x2000 = DLL)"
+foreach ($p in $problems) { Write-Output "  ❌ $p" }
+
+if ($problems.Count -gt 0) {
+  Write-Output ''
+  Write-Output '  Refusing to report success: this image would crash the machine when installed.'
+  exit 6
+}
+Write-Output '  ✅ the image is a native x64 DLL, which is what the kernel loader requires'
 
 # ---------------------------------------------------------------------------------------------
 Step '4. build the user-mode client'
