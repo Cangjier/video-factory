@@ -33,8 +33,7 @@ export function createAnalyzeTool(actions) {
       'audio_events: classify the soundtrack into AudioSet\'s 521 acoustic classes with per-segment timestamps — how you find out where music starts, or that a stretch is silence, which transcription cannot tell you. ' +
       'audio_status: report whether the audio classifier is installed and what it can do, without analysing anything. ' +
       'matte: cut a subject out of its backdrop with a learned model and write a PNG with a transparent background — one image, or one frame of a video when "at" is given. This is the route for a backdrop that is not a flat colour; a green screen should use the plan-level chroma_key instead, which is exact and about two thousand times cheaper. ' +
-      'matte_status: report whether the matting model is installed, and when given a "duration", what a video matte would cost at several mask rates.',
-    actions: ['sample_frames', 'audio_events', 'audio_status', 'matte', 'matte_status'],
+      'matte_status: report whether the matting model is installed, and when given a "duration", what a video matte would cost at several mask rates.',    actions: ['sample_frames', 'audio_events', 'audio_status', 'matte', 'matte_status'],
     extraProperties: {
       target: {
         type: 'string',

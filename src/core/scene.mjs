@@ -376,6 +376,7 @@ async function matteChain(inputs, chain, matte, spec) {
       fps: spec.fps,
       duration: spec.duration,
       background: matte.background,
+      interpolate: matte.interpolate,
     })
   } catch (error) {
     throw new BuildError(`镜头 ${spec.sceneId}：${error instanceof Error ? error.message : String(error)}`)
@@ -396,6 +397,7 @@ async function matteChain(inputs, chain, matte, spec) {
     mask: {
       ...mask,
       maskFps: matte.maskFps,
+      interpolate: matte.interpolate,
       background: matte.background,
       feather: matte.feather,
       notes: [...mask.notes, ...built.notes],

@@ -28,6 +28,15 @@ export const PRESETS = {
 /** Still-image motion types. */
 export const MOTION_TYPES = ['none', 'kenburns', 'zoom-in', 'zoom-out', 'pan-left', 'pan-right']
 
+/**
+ * How a matte's mask moves between the frames it was computed for.
+ *
+ * Declared here rather than imported from `matte.mjs` because that module reaches `probe.mjs` and
+ * therefore back into this one; the values are the same list, and `tests/matte.test.mjs` asserts
+ * they have not drifted apart. The plan schema must be buildable without pulling in the renderer.
+ */
+export const MATTE_INTERPOLATION_MODES = ['hold', 'blend']
+
 /** Transition types ffmpeg's xfade understands, plus `none`. */
 export const TRANSITION_TYPES = [
   'none', 'fade', 'fadeblack', 'fadewhite', 'wipeleft', 'wiperight',
@@ -177,6 +186,12 @@ function parseMatte(raw, where) {
     enabled,
     model: raw.model === undefined || raw.model === null ? 'u2netp' : String(raw.model),
     maskFps: raw.mask_fps === undefined ? 8 : numberField(raw.mask_fps, `${where}.mask_fps`, 0.5, 30),
+    // How the mask moves between the frames it is computed for. `hold` repeats it, which is what
+    // the rate literally means; `blend` cross-fades, which is what makes a low rate usable.
+    interpolate:
+      raw.interpolate === undefined
+        ? 'hold'
+        : enumField(raw.interpolate, MATTE_INTERPOLATION_MODES, `${where}.interpolate`, 'interpolate'),
     background: raw.background === undefined || raw.background === null ? null : String(raw.background),
     feather: raw.feather === undefined ? 0 : numberField(raw.feather, `${where}.feather`, 0, 24),
   }

@@ -17,6 +17,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULT_MASK_FPS,
+  INTERPOLATION_MODES,
   MAX_MASK_FPS,
   MatteError,
   maskStatistics,
@@ -120,6 +121,56 @@ test('the mask rate changes how many frames one mask covers, and says so', () =>
   const fast = videoMatteArguments({ maskDir: 'm', maskCount: 20, maskFps: 20, width: 640, height: 360, fps: 30, duration: 2, background: '#000000' })
   assert.match(slow.notes[0], /15\.0/)
   assert.match(fast.notes[0], /1\.5/)
+})
+
+test('interpolation is applied between the sequence and the scale, not to the picture', () => {
+  const held = videoMatteArguments({
+    maskDir: 'm', maskCount: 4, maskFps: 4, width: 640, height: 360, fps: 24, duration: 2,
+    background: '#102040', interpolate: 'hold',
+  })
+  const blended = videoMatteArguments({
+    maskDir: 'm', maskCount: 4, maskFps: 4, width: 640, height: 360, fps: 24, duration: 2,
+    background: '#102040', interpolate: 'blend',
+  })
+
+  // `hold` must not carry the filter at all: adding it would change nothing visually while
+  // costing a resample, and its absence is what makes the default free.
+  assert.ok(!held.graph.includes('framerate='), 'hold must not resample the mask')
+  // `blend` resamples the *mask* from its own rate up to the output rate.
+  assert.match(blended.graph, /\[1:v\]framerate=fps=24\.000000,scale=640:360/)
+  // The picture must not be resampled by this: it already runs at the output rate.
+  assert.match(blended.graph, /\[0:v\]scale=640:360[^;]*format=rgba\[fg\]/)
+  assert.ok(!/\[0:v\][^;]*framerate=/.test(blended.graph), 'the picture must not be framerate-filtered')
+
+  // Both still hold the sequence at maskFps, which is what makes one mask span several frames.
+  for (const built of [held, blended]) {
+    assert.match(built.inputs.join(' '), /-framerate 4\.000000 -i/)
+  }
+
+  // The notes must tell the caller which behaviour they chose, since the difference is invisible
+  // in the output framing.
+  assert.match(held.notes[0], /台阶/)
+  assert.match(blended.notes[0], /交叉淡入/)
+})
+
+test('interpolation modes stay in step with the enum the plan schema validates against', async () => {
+  const { MATTE_INTERPOLATION_MODES } = await import('../src/core/plan.mjs')
+  // `plan.mjs` declares the list locally to keep the schema free of a renderer dependency, so the
+  // two lists can drift. This is the guard.
+  assert.deepEqual([...MATTE_INTERPOLATION_MODES], [...INTERPOLATION_MODES])
+})
+
+test('an unknown interpolation mode is refused, and motion is not silently accepted', () => {
+  const base = { maskDir: 'm', maskCount: 4, maskFps: 4, width: 640, height: 360, fps: 24, duration: 2, background: '#000000' }
+  assert.throws(() => videoMatteArguments({ ...base, interpolate: 'motion' }), MatteError)
+  assert.throws(() => videoMatteArguments({ ...base, interpolate: 'smooth' }), MatteError)
+  try {
+    videoMatteArguments({ ...base, interpolate: 'motion' })
+    assert.fail('should have thrown')
+  } catch (error) {
+    // The message must name the legal values, since `motion` is the intuitive wrong guess.
+    assert.match(error.message, /hold, blend/)
+  }
 })
 
 test('a video matte without a background is refused, because the alpha would be discarded', () => {
