@@ -33,6 +33,8 @@
 #include <hidport.h>
 #include <vhf.h>
 #include <initguid.h>
+#include <ntstrsafe.h>
+#include <stdarg.h>
 
 #include "vhfkey.h"
 
@@ -108,7 +110,9 @@ VhfKeyTrySubmit(_In_ PVHFKEY_CONTEXT Context)
 {
     UCHAR report[VHFKEY_REPORT_SIZE];
     BOOLEAN submit = FALSE;
-    VHFHANDLE handle;
+    // Initialised to null: the compiler is right that the early-return paths leave it unset, and at W4 the
+    // warning is promoted to an error.
+    VHFHANDLE handle = NULL;
     HID_XFER_PACKET packet;
 
     WdfWaitLockAcquire(Context->ReportLock, NULL);
@@ -316,7 +320,6 @@ VhfKeyEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
     if (!NT_SUCCESS(status)) {
         return status;
     }
-
     return STATUS_SUCCESS;
 }
 

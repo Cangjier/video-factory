@@ -108,6 +108,7 @@ if (-not (Test-Path $systemWdf)) { throw "cannot determine the KMDF version: $sy
 $systemWdfVersion = (Get-Item $systemWdf).VersionInfo.FileVersion
 $minor = [int]([regex]::Match($systemWdfVersion, '^\d+\.(\d+)').Groups[1].Value)
 $wantedName = "1.$minor"
+$kmdfMajor = 1
 Write-Output "  system KMDF: $systemWdfVersion  -> building against $wantedName"
 
 $wdfVersion = Join-Path (Join-Path $wdfInclude 'kmdf') $wantedName | Get-Item -ErrorAction SilentlyContinue
@@ -160,9 +161,23 @@ $includeArgs = @(
 # Defines a kernel driver build expects.
 #
 # _KERNEL_MODE is not defined by the WDK headers themselves, and vhf.h branches on it: without it the
-# structure declares a user-mode FileHandle instead of a kernel DeviceObject, so the field the driver
-# sets does not exist. _AMD64_ must carry its underscores, because the SDK headers test for that exact
-# spelling and otherwise fail with "No Target Architecture".
+# structure declares a user-mode FileHandle instead of a kernel DeviceObject, so the field the driver sets
+# does not exist. _AMD64_ must carry its underscores, because the SDK headers test for that exact spelling
+# and otherwise fail with "No Target Architecture".
+#
+# KMDF_VERSION_MAJOR and KMDF_VERSION_MINOR are the framework version the driver declares it needs, and they
+# must be defined. wdffuncenum.h builds WdfMinimumVersionRequired from them:
+#
+#   ULONG WdfMinimumVersionRequired =
+#       #if defined(KMDF_MINIMUM_VERSION_REQUIRED)  KMDF_MINIMUM_VERSION_REQUIRED
+#       #elif defined(KMDF_VERSION_MINOR)           KMDF_VERSION_MINOR
+#       #else                                       (ULONG)(-1)
+#       #endif
+#
+# With neither macro defined the value becomes 0xFFFFFFFF, which reads as "this driver requires framework
+# version 4294967295". WdfVersionBind rejects that as an invalid parameter, so the driver fails to start
+# before FxDriverEntry ever calls DriverEntry — no crash, no log, just CM_PROB_FAILED_DRIVER_ENTRY and
+# 0xC000000D. The WDK sets both macros from the KmdfVersion property; a hand-rolled build has to set them.
 $defines = @(
   '/D_KERNEL_MODE',
   '/D_WIN64',
@@ -171,7 +186,8 @@ $defines = @(
   '/DDBG=0',
   '/DNDEBUG',
   '/DKERNEL',
-  '/D_WDF_MAJOR_VERSION=1'
+  "/DKMDF_VERSION_MAJOR=$kmdfMajor",
+  "/DKMDF_VERSION_MINOR=$minor"
 )
 
 $commonArgs = @(
@@ -264,6 +280,19 @@ $linkArgs = @(
   # referenced, and the image collapses to a 5 KB stub with no WDF machinery — which is why FxDriverEntry
   # is named explicitly rather than left to a default.
   '/nologo', '/DRIVER', '/DLL', '/SUBSYSTEM:NATIVE', '/ENTRY:FxDriverEntry',
+  # The WDF loader finds a driver's framework binding through an import descriptor for WDFLDR that
+  # wdfldr.lib contributes as __IMPORT_DESCRIPTOR_WDFLDR. Nothing in this driver calls a WDFLDR function
+  # directly — the KMDF calls are static stubs resolved inside the driver — so with /OPT:REF the linker
+  # treats the descriptor as unreferenced and discards it.
+  #
+  # The result is a driver that links cleanly, passes every structural check, and whose import table names
+  # only ntoskrnl: WdfLdr never recognises it, so no framework binding happens, FxDriverEntry fails before
+  # it can call the driver's DriverEntry, and the device reports CM_PROB_FAILED_DRIVER_ENTRY with
+  # 0xC000000D. Nothing in the driver's own code runs, which is why registry and file traces both stayed
+  # empty — the driver looked like it was failing inside itself while it never started at all.
+  #
+  # /INCLUDE forces the descriptor in. The binary grows by the .idata section when it works.
+  '/INCLUDE:__IMPORT_DESCRIPTOR_WDFLDR',
   "/LIBPATH:$kmLib",
   "/LIBPATH:$kmdfLib",
   "/LIBPATH:$msvcLib",
@@ -372,6 +401,40 @@ if ($problems.Count -gt 0) {
   exit 6
 }
 Write-Output '  ✅ the image is a native x64 DLL, which is what the kernel loader requires'
+
+# The framework version the driver declares it needs, read straight out of .data. wdffuncenum.h derives it
+# from KMDF_VERSION_MINOR and falls back to (ULONG)(-1) when that macro is undefined, which reads as
+# "requires framework version 4294967295". WdfVersionBind rejects that, and the driver then fails to start
+# before DriverEntry runs — no crash and no log, only CM_PROB_FAILED_DRIVER_ENTRY with 0xC000000D. The value
+# is checked here because nothing else in the pipeline notices.
+$dataSection = $null
+for ($i = 0; $i -lt [BitConverter]::ToUInt16($image, $peOffset + 6); $i++) {
+  $sectionOffset = $peOffset + 24 + [BitConverter]::ToUInt16($image, $peOffset + 20) + $i * 40
+  $sectionName = [System.Text.Encoding]::ASCII.GetString($image, $sectionOffset, 8).Trim([char]0)
+  if ($sectionName -eq '.data') {
+    $dataSection = @{
+      VirtualAddress = [BitConverter]::ToUInt32($image, $sectionOffset + 12)
+      RawPointer     = [BitConverter]::ToUInt32($image, $sectionOffset + 20)
+    }
+    break
+  }
+}
+$minVersion = -1
+if ($null -ne $dataSection -and (Test-Path $mapFile)) {
+  $minMatch = [regex]::Match((Get-Content $mapFile -Raw),
+    "0003:[0-9a-f]{8}\s+WdfMinimumVersionRequired\s+([0-9a-f]{16})")
+  if ($minMatch.Success) {
+    $minRva = [Convert]::ToInt64($minMatch.Groups[1].Value, 16) - 0x180000000
+    $minOffset = $dataSection.RawPointer + ($minRva - $dataSection.VirtualAddress)
+    if ($minOffset -ge 0 -and $minOffset + 4 -le $image.Length) {
+      $minVersion = [BitConverter]::ToUInt32($image, $minOffset)
+    }
+  }
+}
+Write-Output "  KMDF min version: $minVersion  (the driver requires 1.$minor)"
+if ($minVersion -ne $minor) {
+  $problems += "WdfMinimumVersionRequired is $minVersion, not $minor — KMDF_VERSION_MINOR was not defined at compile time, so WdfVersionBind will reject the driver"
+}
 
 # ---------------------------------------------------------------------------------------------
 Step '3c. place the verified binary where the INF will find it'

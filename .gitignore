@@ -73,3 +73,8 @@ components/vhfkey/driver/x64/
 components/vhfkey/driver/Release/
 *.vcxproj.user
 
+
+# Driver diagnostic output: the trace file and registry milestones were added while locating the bugs below.
+components/vhfkey/device-node.log
+components/vhfkey/install-run.log
+

@@ -77,14 +77,20 @@ if ($leftovers.Count -gt 0) {
 }
 Say "  store is clean: $((@(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' })).Count -eq 0)"
 
-# The binary the INF installs is the one in the driver directory, which is not where the build writes
-# its output. A mismatch there has already sent a stale, crashing binary to the driver store twice, so
-# the two are compared before anything is published.
+# The binary the INF installs is the one in the driver directory, which is not where the build writes its
+# output. A mismatch there has already sent a stale, crashing binary to the driver store twice, so the two
+# are compared before anything is published.
+#
+# The staged file is restored from the build output first. Signing appends about 1.4 KB, so a driver
+# directory left over from a previous run holds a signed copy that can never equal a fresh build — and a
+# check that compares them would refuse every time. Restoring makes the comparison meaningful and also
+# guarantees the staged binary is this build's.
 Say ''
-Say '  comparing the staged binary with the built one:'
+Say '  restoring the staged binary from the build output:'
 $built = Join-Path $component 'out\vhfkey.sys'
 $staged = Join-Path $driverDir 'vhfkey.sys'
 if (-not (Test-Path $built)) { Say '  no build output; run build.ps1 first'; exit 5 }
+Copy-Item $built $staged -Force
 $builtHash = (Get-FileHash $built -Algorithm SHA256).Hash
 $stagedHash = (Get-FileHash $staged -Algorithm SHA256).Hash
 Say "    out:    $((Get-Item $built).Length) bytes  sha $($builtHash.Substring(0,16))"
@@ -92,17 +98,44 @@ Say "    staged: $((Get-Item $staged).Length) bytes  sha $($stagedHash.Substring
 if ($builtHash -ne $stagedHash) {
   Say ''
   Say '  REFUSING TO INSTALL: the staged binary is not the one that was built.'
-  Say '  Installing it would load whatever the driver directory happens to hold.'
   exit 6
 }
-Say '    match'
+Say '    match (unsigned)'
 
 Say ''
-Say '=== 3. publish the driver package ==='
+Say '=== 3. sign the package ==='
+# Order matters: the catalog covers the binary, so it is generated while the binary is still unsigned and
+# both are then signed together. Doing this the other way round leaves a catalog that does not match the
+# binary, and the package is rejected with "The third-party INF does not contain digital signature
+# information".
+$inf2cat = Get-ChildItem (Join-Path $root 'vendor\wdk\tools\c\bin') -Recurse -Filter 'Inf2Cat.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $inf2cat) { Say '  Inf2Cat.exe not found; the catalog cannot be generated'; exit 5 }
+$cat = Join-Path $driverDir 'vhfkey.cat'
+Remove-Item $cat -Force -ErrorAction SilentlyContinue
+Say '  generating the catalog:'
+Say ((& $inf2cat.FullName /driver:"$driverDir" /os:10_X64 2>&1 | Select-Object -Last 3) -join "`n")
+if (-not (Test-Path $cat)) { Say '  catalog generation failed'; exit 6 }
+
+$signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'signtool.exe' -ErrorAction SilentlyContinue |
+  Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
+if ($null -eq $signtool) { Say '  signtool.exe not found'; exit 5 }
+foreach ($file in @($staged, $cat)) {
+  $signed = & $signtool.FullName sign /v /fd SHA256 /a /s My /n 'VhfKeyTest' $file 2>&1
+  $ok = ($signed | Select-String -Pattern 'Successfully signed') -ne $null
+  Say "  $(Split-Path $file -Leaf): $(if ($ok) { 'signed' } else { 'SIGNING FAILED' })"
+  if (-not $ok) { Say (($signed | Select-Object -Last 3) -join "`n"); exit 6 }
+}
+# Signing appends the signature, so the file that was hash-checked above is no longer byte-identical. The
+# size grows by roughly 1.4 KB, which is worth stating because an earlier session mistook a signed 18,800
+# byte binary for an unsigned 17,408 byte one and concluded the wrong build was installed.
+Say "  note: signing grew the binary from $((Get-Item $built).Length) to $((Get-Item $staged).Length) bytes"
+
+Say ''
+Say '=== 4. publish the driver package ==='
 Say ((& pnputil /add-driver (Join-Path $driverDir 'vhfkey.inf') /install 2>&1) -join "`n")
 
 Say ''
-Say '=== 4. confirm the store holds the verified build ==='
+Say '=== 5. confirm the store holds the verified build ==='
 $store = @(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' })
 foreach ($s in $store) {
   foreach ($f in (Get-ChildItem $s.FullName -Filter '*.sys')) {
@@ -116,7 +149,7 @@ foreach ($s in $store) {
 }
 
 Say ''
-Say '=== 5. create the device node ==='
+Say '=== 6. create the device node ==='
 # This is the step the machine crashed at on previous attempts, so the device is created only after the
 # verified package is in the store.
 $devcon = Get-ChildItem (Join-Path $root 'vendor\wdk\tools') -Recurse -Filter 'devcon.exe' -ErrorAction SilentlyContinue |
@@ -127,7 +160,7 @@ Say "  exit code: $LASTEXITCODE"
 Say (($devconOut | ForEach-Object { "  $_" }) -join "`n")
 
 Say ''
-Say '=== 6. result ==='
+Say '=== 7. result ==='
 Start-Sleep -Seconds 3
 $after = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like '*Virtual HID*' -or ($_.InstanceId -like 'ROOT\HIDCLASS*' -and $_.FriendlyName) })
 if ($after.Count -gt 0) {
