@@ -35,6 +35,18 @@ vhfkey.sys = 1,,
 [VhfKey_Install.NT]
 CopyFiles = VhfKey_CopyFiles
 
+; Registering vhf as a lower filter is what puts the framework beneath this driver in the device
+; stack, and it is required: VhfCreate talks to vhf.sys, and without this line the framework is never
+; in the stack to answer, so the driver loads and every virtual device it tries to create fails.
+;
+; This section was missing at first, which is the kind of omission that produces a driver that
+; installs cleanly and then does nothing.
+[VhfKey_Install.NT.HW]
+AddReg = VhfKey_Install.NT.AddReg
+
+[VhfKey_Install.NT.AddReg]
+HKR,,"LowerFilters",0x00010000,"vhf"
+
 [VhfKey_Install.NT.Services]
 AddService = vhfkey, %SPSVCINST_ASSOCSERVICE%, VhfKey_Service
 
