@@ -59,3 +59,7 @@ components/vhfkey/driver/*.sys
 
 # Driver install log: records this machine's device state and is regenerated on every run.
 components/vhfkey/device-node.log
+
+# Crash analysis transcripts and symbol caches: large, machine-specific, regenerated on demand.
+tmp/kd-*.txt
+

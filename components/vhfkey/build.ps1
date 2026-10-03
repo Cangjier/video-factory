@@ -1,4 +1,4 @@
-# Build the virtual HID keyboard: the kernel driver and its user-mode client.
+﻿# Build the virtual HID keyboard: the kernel driver and its user-mode client.
 #
 # Sources of the toolchain, each from where it actually lives rather than from a Visual Studio install:
 #   compiler and linker   C:\BuildTools (VS Build Tools, installed separately)
@@ -87,10 +87,38 @@ $sdkLib = 'C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0'
 if (-not (Test-Path $sdkInclude)) { throw "Windows SDK include not found: $sdkInclude" }
 Write-Output "  sdk include: $sdkInclude"
 
-# A compatible WDF version directory: the newest available, since the API is additive.
-$wdfVersion = Get-ChildItem (Join-Path $wdfInclude 'kmdf') -Directory -ErrorAction SilentlyContinue |
-  Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
-if ($null -eq $wdfVersion) { throw 'no kmdf version directory found in the WDK' }
+# Which KMDF version to build against.
+#
+# Not the newest available. The driver links against a version-specific function table — the symbol is
+# named WdfFunctions_01035 for 1.35 — and the running Wdf01000.sys only provides the tables up to its own
+# version. A driver built for a newer minor version than the target system supports gets a null table
+# and faults on the first framework call:
+#
+#   vhfkey!WdfDriverCreate+0x52:
+#     mov  r10, qword ptr [vhfkey!WdfFunctions_01035]
+#     call qword ptr [r10+rax]      <- access violation
+#
+# The system here runs Wdf01000.sys 1.31, so the version is read from that file rather than guessed.
+# Taking the newest directory (1.35, meant for Windows 11) is what produced the crash.
+$systemWdf = Join-Path $env:SystemRoot 'System32\drivers\Wdf01000.sys'
+if (-not (Test-Path $systemWdf)) { throw "cannot determine the KMDF version: $systemWdf not found" }
+$systemWdfVersion = (Get-Item $systemWdf).VersionInfo.FileVersion
+$minor = [int]([regex]::Match($systemWdfVersion, '^\d+\.(\d+)').Groups[1].Value)
+$wantedName = "1.$minor"
+Write-Output "  system KMDF: $systemWdfVersion  -> building against $wantedName"
+
+$wdfVersion = Join-Path (Join-Path $wdfInclude 'kmdf') $wantedName | Get-Item -ErrorAction SilentlyContinue
+if ($null -eq $wdfVersion) {
+  # Fall back to the newest version that is not newer than the system supports, rather than to the
+  # newest overall.
+  $wdfVersion = Get-ChildItem (Join-Path $wdfInclude 'kmdf') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { [version]$_.Name -le [version]$wantedName } |
+    Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+  if ($null -ne $wdfVersion) {
+    Write-Output "  $wantedName is not in the WDK; using $($wdfVersion.Name) instead"
+  }
+}
+if ($null -eq $wdfVersion) { throw 'no kmdf version directory at or below the system version was found' }
 Write-Output "  kmdf:        $($wdfVersion.FullName)"
 
 # CRC32 support for the environment: some driver headers include crt headers that expect it.
@@ -253,6 +281,28 @@ if ($machine -ne 0x8664) { $problems += "machine is 0x$($machine.ToString('X4'))
 if ($subsystem -ne 1) { $problems += "subsystem is $subsystem, expected 1 (native)" }
 if (-not ($characteristics -band 0x2000)) {
   $problems += "IMAGE_FILE_DLL (0x2000) is not set — characteristics are 0x$($characteristics.ToString('X4')); a kernel driver must link with /DLL"
+}
+
+# The framework version table is identified by the symbol WdfFunctions_01031, and it is listed in the
+# map file rather than present in the image's data: the first version of this check searched the binary
+# for the string, found nothing, and so reported a correct build as broken. Asking for a table the system
+# does not provide is an access violation on the first framework call, which is what a version mismatch
+# produced.
+$mapFile = Join-Path $output 'vhfkey.map'
+$linkedTable = $null
+if (Test-Path $mapFile) {
+  $tableMatch = [regex]::Match((Get-Content $mapFile -Raw), 'WdfFunctions_(\d{5})')
+  if ($tableMatch.Success) { $linkedTable = $tableMatch.Groups[1].Value }
+}
+if ($null -ne $linkedTable) {
+  $linkedMinor = [int]$linkedTable.Substring(2)
+  Write-Output "  KMDF table:      WdfFunctions_$linkedTable  (system supports 1.$minor)"
+  if ($linkedMinor -gt $minor) {
+    $problems += "the driver requests WdfFunctions_$linkedTable (KMDF 1.$linkedMinor) but the system's Wdf01000.sys provides only 1.$minor"
+  }
+} else {
+  Write-Output '  KMDF table:      not found in the map file (unexpected for a KMDF driver)'
+  $problems += 'no WdfFunctions_ table symbol found; the driver does not appear to be linked as a KMDF driver'
 }
 
 Write-Output "  machine:         0x$($machine.ToString('X4'))"
