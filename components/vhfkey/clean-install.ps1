@@ -1,4 +1,4 @@
-# clean-install.ps1 — remove every trace of the driver, then install it from scratch.
+﻿# clean-install.ps1 — remove every trace of the driver, then install it from scratch.
 #
 # A plain reinstall leaves the previous device nodes behind, and a node that no longer matches the INF keeps
 # its old virtual HID children in a Disconnected state. Those stale nodes are not harmless: the client opens

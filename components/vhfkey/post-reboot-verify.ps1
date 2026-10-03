@@ -1,4 +1,4 @@
-# post-reboot-verify.ps1 — reinstall and verify both virtual devices after a reboot, then report by email.
+﻿# post-reboot-verify.ps1 — reinstall and verify both virtual devices after a reboot, then report by email.
 #
 # The machine accumulated device state over a long session of driver installs, and the virtual keyboard
 # stopped producing input while the virtual mouse, from the same code and the same framework, kept working.

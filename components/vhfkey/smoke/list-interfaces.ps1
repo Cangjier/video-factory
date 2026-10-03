@@ -1,4 +1,4 @@
-# list-interfaces.ps1 — enumerate every device interface the driver registers, for both GUIDs.
+﻿# list-interfaces.ps1 — enumerate every device interface the driver registers, for both GUIDs.
 #
 # "Which device am I talking to" turned out to be the question that mattered: the client opens the first
 # matching interface, and after several install cycles a device node can be left behind that still enumerates
