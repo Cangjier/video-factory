@@ -118,14 +118,25 @@ export async function driverAvailable() {
 /**
  * The offset from a window's own corner to its content area, in screen pixels.
  *
- * A browser reports element positions in client coordinates, which start at the content area
- * rather than at the window frame: below the title bar, the tab strip and the address bar, and
- * inside the window border. Client coordinates are therefore not screen coordinates.
+ * A browser reports element positions in client coordinates, which start at the content area rather
+ * than at the window frame: below the title bar, the tab strip and the address bar, and inside the
+ * window border. Client coordinates are therefore not screen coordinates.
  *
- * Measured on this machine for a window at (40,30): the content origin is at screen (51,110), so
- * this offset is (11,80). Chrome height dominates the vertical part and varies with what the
- * browser is showing — a bookmarks bar adds roughly 30 px — so treat this as a default to be
- * measured, not a constant to be trusted. {@link measureContentOffset} derives it by clicking.
+ * This value is NOT a constant, and treating it as one is what cost several rounds here. Measured at
+ * two window positions on this machine:
+ *
+ *   window at (0,0)    →  content origin (11, 80)
+ *   window at (24,24)  →  content origin (35,104)
+ *
+ * The horizontal term tracks the window position while the vertical one does not, so composing the
+ * window position with a fixed chrome height does not describe reality. {@link measureContentOffset}
+ * measures it instead of deriving it.
+ *
+ * The measurement that finally worked is indirect and worth repeating: click a series of points and
+ * have the application report the client coordinate of each click. The difference between where a
+ * click was aimed and where the application says it arrived is the content origin. Here it came back
+ * identical across five clicks — (35,104) — which is what made it trustworthy after several
+ * confidently wrong derivations.
  */
 export const CONTENT_OFFSET = { x: 11, y: 80 }
 
