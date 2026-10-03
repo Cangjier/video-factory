@@ -42,10 +42,18 @@ test('keyboard ranks the filter driver last', () => {
   assert.ok(order.indexOf('sendinput') < order.indexOf('driver'))
 })
 
-test('mouse still prefers the filter driver', () => {
-  // The pointer path through that driver does work: move lands exactly where aimed and click activates a
-  // control. There is no virtual pointer yet, so this is unchanged.
-  assert.deepEqual(TRANSPORT_PREFERENCE.mouse, ['driver', 'sendinput'])
+test('mouse prefers the virtual HID mouse', () => {
+  // It is a real HID device with absolute positioning, measured accurate to within a pixel, so nothing above
+  // the HID layer can treat its input as synthetic. The filter driver follows, then SendInput.
+  assert.equal(TRANSPORT_PREFERENCE.mouse[0], 'virtualmouse')
+  assert.deepEqual(TRANSPORT_PREFERENCE.mouse, ['virtualmouse', 'driver', 'sendinput'])
+})
+
+test('the keyboard and mouse preferences never name each other device', () => {
+  // A keyboard report delivered to the mouse device would be read as a pointer movement, and the reverse as a
+  // keystroke. The two lists are separate, and this keeps them that way.
+  assert.ok(!TRANSPORT_PREFERENCE.keyboard.includes('virtualmouse'))
+  assert.ok(!TRANSPORT_PREFERENCE.mouse.includes('virtualkbd'))
 })
 
 // ---------------------------------------------------------------------------------------------

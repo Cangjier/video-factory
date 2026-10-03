@@ -1,25 +1,27 @@
 /*
- * vhfhid.c — virtual HID keyboard and mouse, presented through the Virtual HID Framework.
+ * vhfhid.c - virtual HID keyboard and mouse, presented through the Virtual HID Framework.
  *
- * The driver owns two HID devices. Because they sit in the HID stack rather than beside it, Windows routes
- * their reports exactly as it routes real hardware's, and no consumer can tell the difference or decline to
- * receive them. That property is what the earlier filter-driver approach lacked: a filter can be bypassed
- * or simply fail to attach, and on this machine its keyboard path accepted keystrokes that never arrived.
+ * One device node creates one virtual HID device, and which one is decided by the hardware ID the node was
+ * enumerated with: root\vhfhidkey gives a keyboard, root\vhfhidmouse gives a mouse. The driver binary and
+ * the service are shared; the nodes are separate.
  *
- * Flow, in the order the framework drives it, once per device:
+ * That structure is deliberate, and it replaces an earlier design. The first version created both virtual
+ * devices from a single device object, holding both sets of state in one allocated context, and it crashed
+ * with an access violation inside the framework's ready callback: the device pointer loaded from the stack
+ * was not a pointer at all, and it had been usable two instructions earlier, in a memcpy reading through the
+ * same register. Rather than keep guessing at why, this removes the sharing that made such a failure
+ * possible - one virtual device, one device object, one context, and no pointer arithmetic into a parent
+ * structure.
+ *
+ * Flow, in the order the framework drives it:
  *
  *   1. VHF is told about the device, with the report descriptor that defines it.
  *   2. The HID stack asks for a report. VHF answers by calling the ready callback, which says "I can take
  *      one report now".
- *   3. User mode hands over a report through that device's IOCTL. If VHF is waiting, the report goes
- *      through with VhfReadReportSubmit and becomes input; if not, it waits here until it is.
+ *   3. User mode hands over a report through this device's IOCTL. If VHF is waiting, the report goes through
+ *      with VhfReadReportSubmit and becomes input; if not, it waits here until it is.
  *
- * The read queue belongs to VHF, not to this driver. Implementing IOCTL_HID_READ_REPORT here would compete
- * with the framework for requests it already owns.
- *
- * Both devices share one implementation. The per-device state lives in VHFDEVICE, and VHF_CONFIG's
- * VhfClientContext points at the right one, so the ready and cleanup callbacks know which device they are
- * being told about without a lookup or a global.
+ * The read queue belongs to VHF, not to this driver.
  */
 
 #define INITGUID
@@ -34,17 +36,15 @@
 
 /*
  * The Virtual HID Framework declarations come from vhf.h. Hand-declaring VHF_CONFIG was tried first and
- * would have been a trap: the real structure differs in most fields from what the published prose suggests
- * — VendorID is USHORT rather than ULONG, there is no handle member, and there are members for an
- * operation context, the device object and the ready callback. VhfCreate reads it by offset, so a wrong
- * layout compiles cleanly and then misbehaves at run time.
+ * would have been a trap: the real structure differs in most fields from what the published prose suggests,
+ * and VhfCreate reads it by offset, so a wrong layout compiles cleanly and then misbehaves at run time.
  */
 
 /*
  * The keyboard report descriptor: a standard keyboard, eight-byte reports.
  *
  * It declares one modifier byte (eight one-bit usages), one reserved byte, and six key slots covering the
- * full usage range — the boot-protocol layout Windows has understood since before USB existed.
+ * full usage range - the boot-protocol layout Windows has understood since before USB existed.
  */
 static const UCHAR g_KeyboardReportDescriptor[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
@@ -75,16 +75,15 @@ static const UCHAR g_KeyboardReportDescriptor[] = {
 /*
  * The mouse report descriptor: a three-button mouse with absolute X and Y and a wheel.
  *
- * The report is six bytes and the fields follow in this order — the client builds its reports to match, so
- * the two must be read together:
+ * Six bytes, and the client builds its reports to match - read the two together when changing either:
  *
  *   byte 0       three button bits, then five bits of padding to reach the byte boundary
  *   bytes 1-2    X, absolute, 16-bit little-endian, 0..32767
  *   bytes 3-4    Y, absolute, 16-bit little-endian, 0..32767
  *   byte 5       vertical wheel, relative, signed
  *
- * The padding is not decoration. Without it the axes would begin mid-byte and every following field would
- * be offset by five bits, which the HID parser would reject as a report that does not match its descriptor.
+ * The padding is not decoration. Without it the axes would begin mid-byte and every following field would be
+ * offset by five bits, which the HID parser would reject as a report that does not match its descriptor.
  */
 static const UCHAR g_MouseReportDescriptor[] = {
     0x05, 0x01,        // Usage Page (Generic Desktop)
@@ -122,24 +121,38 @@ static const UCHAR g_MouseReportDescriptor[] = {
 };
 
 /*
- * Per-device state.
+ * The largest report either device produces, used as the size of the holding buffer.
  *
- * Two of these exist, one per virtual device, and each VHF_CONFIG carries a pointer to its own so the
- * callbacks are told which device they concern rather than having to work it out.
+ * The buffer is deliberately larger than any report needs to be. A buffer sized exactly to the report is the
+ * kind of thing that turns a length mistake into silent memory corruption, and the field it would corrupt
+ * sits immediately after it.
  */
+#define VHFHID_MAX_REPORT 16
+
+/*
+ * Per-device state. One of these per device node, because a node creates exactly one virtual device.
+ */
+/*
+ * The holding buffer must be able to contain either report. Checked at compile time rather than trusted,
+ * because the failure mode of getting it wrong is a stack overflow that surfaces somewhere else entirely.
+ */
+typedef char VHFHID_REPORT_FITS[
+    (VHFKEY_REPORT_SIZE <= VHFHID_MAX_REPORT && VHFMOUSE_REPORT_SIZE <= VHFHID_MAX_REPORT) ? 1 : -1];
+
 typedef struct _VHFDEVICE {
     VHFHANDLE    VhfHandle;
-    WDFWAITLOCK  ReportLock;                      // guards the slot and the flag below
-    UCHAR        PendingReport[16];               // large enough for either device's report
-    ULONG        ReportLength;                    // the length that device's descriptor declares
+    WDFWAITLOCK  ReportLock;
+    UCHAR        PendingReport[VHFHID_MAX_REPORT];
+    ULONG        ReportLength;
     BOOLEAN      HasPendingReport;
-    BOOLEAN      VhfReadyForReport;               // the framework has asked for one
+    BOOLEAN      VhfReadyForReport;
 } VHFDEVICE, *PVHFDEVICE;
 
 typedef struct _VHFHID_CONTEXT {
     WDFDEVICE    Device;
-    VHFDEVICE    Keyboard;
-    VHFDEVICE    Mouse;
+    BOOLEAN      IsMouse;
+    ULONG        IoControlCode;
+    VHFDEVICE    Virtual;
 } VHFHID_CONTEXT, *PVHFHID_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHFHID_CONTEXT, VhfHidGetContext)
@@ -151,34 +164,33 @@ EVT_WDF_DEVICE_CONTEXT_CLEANUP VhfHidEvtDeviceContextCleanup;
 EVT_VHF_READY_FOR_NEXT_READ_REPORT VhfHidEvtReadyForNextRead;
 EVT_VHF_CLEANUP VhfHidEvtVhfCleanup;
 
-/*
- * Hand the waiting report to the framework, if there is one and the framework wants it.
- *
- * Called both when a report arrives and when the framework says it is ready, because either can come first
- * and only the pair matters. The lock is released before VhfReadReportSubmit: the call can re-enter this
- * driver, and holding a lock across it would deadlock.
- */
 static VOID
 VhfHidTrySubmit(_In_ PVHFDEVICE Device)
 {
-    UCHAR report[16];
-    ULONG length;
+    UCHAR report[VHFHID_MAX_REPORT];
+    ULONG length = 0;
     BOOLEAN submit = FALSE;
     VHFHANDLE handle = NULL;
     HID_XFER_PACKET packet;
 
+    if (Device == NULL) {
+        return;
+    }
+
     WdfWaitLockAcquire(Device->ReportLock, NULL);
-    // The handle is tested under the lock because the cleanup callback clears it: between a report arriving
-    // and this call the device can be removed, and submitting to a null handle is an access violation inside
-    // a kernel path — the same class of failure the /DLL bug produced.
+
     if (Device->HasPendingReport && Device->VhfReadyForReport && Device->VhfHandle != NULL) {
-        length = Device->ReportLength;
-        RtlCopyMemory(report, Device->PendingReport, length);
+        ULONG pending = Device->ReportLength;
+        if (pending > 0 && pending <= sizeof(report)) {
+            RtlCopyMemory(report, Device->PendingReport, pending);
+            length = pending;
+            handle = Device->VhfHandle;
+            submit = TRUE;
+        }
         Device->HasPendingReport = FALSE;
         Device->VhfReadyForReport = FALSE;
-        handle = Device->VhfHandle;
-        submit = TRUE;
     }
+
     WdfWaitLockRelease(Device->ReportLock);
 
     if (!submit) {
@@ -191,17 +203,14 @@ VhfHidTrySubmit(_In_ PVHFDEVICE Device)
     (VOID)VhfReadReportSubmit(handle, &packet);
 }
 
-/*
- * The framework is ready for one report.
- *
- * A notification, not a request: VHF owns the read queue and will accept exactly one report per call. The
- * flag is set here and cleared when a report actually goes out, so a report that arrives while the framework
- * is busy is not dropped.
- */
 static VOID
 VhfHidEvtReadyForNextRead(_In_ PVOID VhfClientContext)
 {
     PVHFDEVICE device = (PVHFDEVICE)VhfClientContext;
+
+    if (device == NULL) {
+        return;
+    }
 
     WdfWaitLockAcquire(device->ReportLock, NULL);
     device->VhfReadyForReport = TRUE;
@@ -210,72 +219,46 @@ VhfHidEvtReadyForNextRead(_In_ PVOID VhfClientContext)
     VhfHidTrySubmit(device);
 }
 
-/*
- * VHF has finished with the handle and will not call back again.
- *
- * Required because this driver holds resources for the virtual device. Without it there is nothing to tell
- * the driver that the framework has stopped referencing the client context, so a callback already in flight
- * could arrive after the context has been freed.
- */
 static VOID
 VhfHidEvtVhfCleanup(_In_ PVOID VhfClientContext)
 {
     PVHFDEVICE device = (PVHFDEVICE)VhfClientContext;
 
+    if (device == NULL) {
+        return;
+    }
+
+    WdfWaitLockAcquire(device->ReportLock, NULL);
     device->VhfHandle = NULL;
     device->VhfReadyForReport = FALSE;
     device->HasPendingReport = FALSE;
+    WdfWaitLockRelease(device->ReportLock);
 }
 
-/*
- * A report arrived from user mode.
- *
- * The device is chosen by the IOCTL, not by the buffer length, so a report can never be delivered to the
- * wrong virtual device. The length is then checked against what that device's descriptor declares: a short
- * buffer would be read past its end, and a long one truncated into a report the HID stack never agreed to.
- */
 static VOID
-VhfHidAcceptReport(
-    _In_ WDFREQUEST Request,
-    _In_ size_t InputBufferLength,
-    _In_ PVHFDEVICE Device,
-    _In_ ULONG ExpectedLength,
-    _In_ PCSTR DeviceName
-    )
+VhfHidAcceptReport(_In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ PVHFHID_CONTEXT Context)
 {
-    PVOID buffer = NULL;
-    size_t length = 0;
+    PVOID    buffer = NULL;
+    size_t   length = 0;
     NTSTATUS status;
 
-    /*
-     * The length is checked against what the descriptor declares before the buffer is touched: a short
-     * buffer would be read past its end, and a long one truncated into a report the HID stack never agreed
-     * to. Both are refused rather than guessed at.
-     *
-     * The reported expectation names the device, because "invalid buffer size" on its own does not say
-     * whether the keyboard or the mouse was being spoken to.
-     */
-    if (InputBufferLength != ExpectedLength) {
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
-                   "vhfhid: %s report length %Iu, expected %lu\n", DeviceName, InputBufferLength, ExpectedLength);
+    if (InputBufferLength != Context->Virtual.ReportLength) {
         WdfRequestComplete(Request, STATUS_INVALID_BUFFER_SIZE);
         return;
     }
 
-    status = WdfRequestRetrieveInputBuffer(Request, ExpectedLength, &buffer, &length);
+    status = WdfRequestRetrieveInputBuffer(Request, Context->Virtual.ReportLength, &buffer, &length);
     if (!NT_SUCCESS(status)) {
         WdfRequestComplete(Request, status);
         return;
     }
 
-    WdfWaitLockAcquire(Device->ReportLock, NULL);
-    // A newer report replaces an older one rather than queueing behind it. For an input device that is the
-    // right behaviour: holding two reports would replay a movement or a keystroke the user has finished.
-    RtlCopyMemory(Device->PendingReport, buffer, ExpectedLength);
-    Device->HasPendingReport = TRUE;
-    WdfWaitLockRelease(Device->ReportLock);
+    WdfWaitLockAcquire(Context->Virtual.ReportLock, NULL);
+    RtlCopyMemory(Context->Virtual.PendingReport, buffer, Context->Virtual.ReportLength);
+    Context->Virtual.HasPendingReport = TRUE;
+    WdfWaitLockRelease(Context->Virtual.ReportLock);
 
-    VhfHidTrySubmit(Device);
+    VhfHidTrySubmit(&Context->Virtual);
     WdfRequestComplete(Request, STATUS_SUCCESS);
 }
 
@@ -293,17 +276,12 @@ VhfHidEvtIoDeviceControl(
 
     UNREFERENCED_PARAMETER(OutputBufferLength);
 
-    switch (IoControlCode) {
-    case IOCTL_VHFKEY_SEND_REPORT:
-        VhfHidAcceptReport(Request, InputBufferLength, &context->Keyboard, VHFKEY_REPORT_SIZE, "keyboard");
-        return;
-    case IOCTL_VHFMOUSE_SEND_REPORT:
-        VhfHidAcceptReport(Request, InputBufferLength, &context->Mouse, VHFMOUSE_REPORT_SIZE, "mouse");
-        return;
-    default:
+    if (IoControlCode != context->IoControlCode) {
         WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST);
         return;
     }
+
+    VhfHidAcceptReport(Request, InputBufferLength, context);
 }
 
 static VOID
@@ -312,99 +290,65 @@ VhfHidEvtDeviceContextCleanup(_In_ WDFOBJECT DeviceObject)
     WDFDEVICE       device = (WDFDEVICE)DeviceObject;
     PVHFHID_CONTEXT context = VhfHidGetContext(device);
 
-    // Wait, so the framework has released each handle before the context disappears.
-    if (context->Keyboard.VhfHandle != NULL) {
-        VhfDelete(context->Keyboard.VhfHandle, TRUE);
-        context->Keyboard.VhfHandle = NULL;
-    }
-    if (context->Mouse.VhfHandle != NULL) {
-        VhfDelete(context->Mouse.VhfHandle, TRUE);
-        context->Mouse.VhfHandle = NULL;
+    if (context->Virtual.VhfHandle != NULL) {
+        VhfDelete(context->Virtual.VhfHandle, TRUE);
+        context->Virtual.VhfHandle = NULL;
     }
 }
 
 /*
- * Create one virtual device.
+ * Does this node create the mouse?
  *
- * Shared by both, because the only differences are the descriptor, its length, the interface GUID and which
- * VHFDEVICE holds the state. Writing it twice would have meant two places for the same mistake.
+ * The two nodes share one driver binary, and the installer writes an IsMouse value into each node's hardware
+ * key — 1 for the mouse node, 0 for the keyboard. The driver reads that value.
+ *
+ * Inferring it from HardwareID was tried first and does not work: that value is a REG_MULTI_SZ, and
+ * WdfRegistryQueryString expects a REG_SZ, so the query fails and both nodes fall back to the keyboard. The
+ * symptom was a mouse node reporting OK while creating a keyboard, which is invisible until something tries
+ * to move the pointer.
+ *
+ * Anything unreadable or unrecognised means the keyboard, which is the safer default: it is the node that
+ * must not be mistaken for a pointing device.
  */
-static NTSTATUS
-VhfHidCreateDevice(
-    _In_ WDFDEVICE Device,
-    _In_ PVHFDEVICE State,
-    _In_reads_(DescriptorLength) const UCHAR *Descriptor,
-    _In_ ULONG DescriptorLength,
-    _In_ const GUID *InterfaceGuid,
-    _In_ USHORT VendorId,
-    _In_ USHORT ProductId
-    )
+static BOOLEAN
+VhfHidIsMouseNode(_In_ WDFDEVICE Device)
 {
-    VHF_CONFIG            config;
-    WDF_OBJECT_ATTRIBUTES lockAttributes;
-    NTSTATUS             status;
+    WDFKEY          key = NULL;
+    UNICODE_STRING  valueName;
+    ULONG           value = 0;
+    NTSTATUS        status;
+    BOOLEAN         isMouse = FALSE;
 
-    State->ReportLength = DescriptorLength;
-
-    /*
-     * The lock is parented to the device, not to the driver.
-     *
-     * WDF_NO_OBJECT_ATTRIBUTES would parent it to the driver object, which outlives the device. The lock
-     * would then be disposed of at driver unload rather than at device removal, so during a device restart
-     * the framework could still be calling into this driver while the lock it depends on had been torn down
-     * with the rest of the device's objects — reading freed memory, which is what the crash in
-     * VhfHidTrySubmit was: a device pointer that was no longer valid.
-     */
-    WDF_OBJECT_ATTRIBUTES_INIT(&lockAttributes);
-    lockAttributes.ParentObject = Device;
-    status = WdfWaitLockCreate(&lockAttributes, &State->ReportLock);
+    status = WdfDeviceOpenRegistryKey(Device, PLUGPLAY_REGKEY_DEVICE, KEY_READ,
+                                      WDF_NO_OBJECT_ATTRIBUTES, &key);
     if (!NT_SUCCESS(status)) {
-        return status;
+        return FALSE;
     }
 
-    /*
-     * Create the virtual device, using the layout vhf.h declares.
-     *
-     * ReportDescriptorLength is a byte count, not an element count. Passing the element count would
-     * under-report the descriptor and the HID stack would parse a truncated one.
-     */
-    RtlZeroMemory(&config, sizeof(config));
-    config.Size = sizeof(config);
-    config.VhfClientContext = State;
-    config.DeviceObject = WdfDeviceWdmGetDeviceObject(Device);
-    config.ReportDescriptorLength = (USHORT)DescriptorLength;
-    config.ReportDescriptor = (PUCHAR)Descriptor;
-    config.VendorID = VendorId;
-    config.ProductID = ProductId;
-    config.VersionNumber = 1;
-    config.EvtVhfReadyForNextReadReport = VhfHidEvtReadyForNextRead;
-    config.EvtVhfCleanup = VhfHidEvtVhfCleanup;
-
-    status = VhfCreate(&config, &State->VhfHandle);
-    if (!NT_SUCCESS(status)) {
-        return status;
+    RtlInitUnicodeString(&valueName, L"IsMouse");
+    status = WdfRegistryQueryULong(key, &valueName, &value);
+    if (NT_SUCCESS(status) && value == 1) {
+        isMouse = TRUE;
     }
 
-    status = VhfStart(State->VhfHandle);
-    if (!NT_SUCCESS(status)) {
-        VhfDelete(State->VhfHandle, TRUE);
-        State->VhfHandle = NULL;
-        return status;
-    }
-
-    // An interface so user mode can find this device by GUID rather than by a path whose shape depends on
-    // enumeration order — and so it can tell the two devices apart.
-    return WdfDeviceCreateDeviceInterface(Device, InterfaceGuid, NULL);
+    WdfRegistryClose(key);
+    return isMouse;
 }
-
 static NTSTATUS
 VhfHidEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 {
-    WDFDEVICE         device;
-    PVHFHID_CONTEXT   context;
+    WDFDEVICE             device;
+    PVHFHID_CONTEXT       context;
     WDF_OBJECT_ATTRIBUTES attributes;
+    WDF_OBJECT_ATTRIBUTES lockAttributes;
     WDF_IO_QUEUE_CONFIG   queueConfig;
-    NTSTATUS          status;
+    VHF_CONFIG            config;
+    const UCHAR          *descriptor;
+    ULONG                 descriptorLength;   // bytes of the report DESCRIPTOR
+    ULONG                 reportLength;       // bytes of one REPORT — not the same thing
+    const GUID           *interfaceGuid;
+    USHORT                productId;
+    NTSTATUS              status;
 
     UNREFERENCED_PARAMETER(Driver);
 
@@ -420,11 +364,42 @@ VhfHidEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 
     context = VhfHidGetContext(device);
     context->Device = device;
-    RtlZeroMemory(&context->Keyboard, sizeof(context->Keyboard));
-    RtlZeroMemory(&context->Mouse, sizeof(context->Mouse));
+    context->IsMouse = VhfHidIsMouseNode(device);
+    RtlZeroMemory(&context->Virtual, sizeof(context->Virtual));
 
-    // One queue for user-mode reports. Sequential, so two reports cannot interleave into an input event that
-    // neither caller asked for.
+    /*
+     * The descriptor length and the report length are different numbers and must not be interchanged.
+     *
+     * The descriptor is the fifty-odd bytes describing the device's report format; the report is the handful
+     * of bytes actually sent. Setting the report length to the descriptor length makes the driver copy fifty
+     * bytes into a sixteen-byte buffer, which overflows the stack and destroys whatever followed it. That is
+     * exactly what an earlier version did, and the resulting fault appeared inside a framework callback two
+     * instructions later, which is why it took so long to attribute.
+     */
+    if (context->IsMouse) {
+        descriptor = g_MouseReportDescriptor;
+        descriptorLength = sizeof(g_MouseReportDescriptor);
+        reportLength = VHFMOUSE_REPORT_SIZE;
+        interfaceGuid = &GUID_DEVINTERFACE_VHFMOUSE;
+        context->IoControlCode = IOCTL_VHFMOUSE_SEND_REPORT;
+        productId = 0x5679;
+    } else {
+        descriptor = g_KeyboardReportDescriptor;
+        descriptorLength = sizeof(g_KeyboardReportDescriptor);
+        reportLength = VHFKEY_REPORT_SIZE;
+        interfaceGuid = &GUID_DEVINTERFACE_VHFKEY;
+        context->IoControlCode = IOCTL_VHFKEY_SEND_REPORT;
+        productId = 0x5678;
+    }
+    context->Virtual.ReportLength = reportLength;
+
+    WDF_OBJECT_ATTRIBUTES_INIT(&lockAttributes);
+    lockAttributes.ParentObject = device;
+    status = WdfWaitLockCreate(&lockAttributes, &context->Virtual.ReportLock);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchSequential);
     queueConfig.EvtIoDeviceControl = VhfHidEvtIoDeviceControl;
     status = WdfIoQueueCreate(device, &queueConfig, WDF_NO_OBJECT_ATTRIBUTES, WDF_NO_HANDLE);
@@ -432,19 +407,31 @@ VhfHidEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
         return status;
     }
 
-    status = VhfHidCreateDevice(device, &context->Keyboard, g_KeyboardReportDescriptor,
-                                sizeof(g_KeyboardReportDescriptor), &GUID_DEVINTERFACE_VHFKEY, 0x1234, 0x5678);
+    RtlZeroMemory(&config, sizeof(config));
+    config.Size = sizeof(config);
+    config.VhfClientContext = &context->Virtual;
+    config.DeviceObject = WdfDeviceWdmGetDeviceObject(device);
+    config.ReportDescriptorLength = (USHORT)descriptorLength;
+    config.ReportDescriptor = (PUCHAR)descriptor;
+    config.VendorID = 0x1234;
+    config.ProductID = productId;
+    config.VersionNumber = 1;
+    config.EvtVhfReadyForNextReadReport = VhfHidEvtReadyForNextRead;
+    config.EvtVhfCleanup = VhfHidEvtVhfCleanup;
+
+    status = VhfCreate(&config, &context->Virtual.VhfHandle);
     if (!NT_SUCCESS(status)) {
         return status;
     }
 
-    status = VhfHidCreateDevice(device, &context->Mouse, g_MouseReportDescriptor,
-                                sizeof(g_MouseReportDescriptor), &GUID_DEVINTERFACE_VHFMOUSE, 0x1234, 0x5679);
+    status = VhfStart(context->Virtual.VhfHandle);
     if (!NT_SUCCESS(status)) {
+        VhfDelete(context->Virtual.VhfHandle, TRUE);
+        context->Virtual.VhfHandle = NULL;
         return status;
     }
 
-    return STATUS_SUCCESS;
+    return WdfDeviceCreateDeviceInterface(device, interfaceGuid, NULL);
 }
 
 NTSTATUS

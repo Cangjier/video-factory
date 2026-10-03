@@ -219,7 +219,7 @@ Step '3. link the driver'
 # ---------------------------------------------------------------------------------------------
 
 $link = Join-Path $binDir 'link.exe'
-$sys = Join-Path $output 'vhfkey.sys'
+$sys = Join-Path $output 'vhfhid.sys'
 # The library paths are built as single strings. Writing them as '/LIBPATH:' + $path inside an array
 # literal produces two separate arguments, and the linker then reports the option as having no
 # argument — a message that points at the option rather than at the concatenation that split it.
@@ -297,8 +297,8 @@ $linkArgs = @(
   "/LIBPATH:$kmdfLib",
   "/LIBPATH:$msvcLib",
   "/OUT:$sys",
-  "/PDB:$(Join-Path $output 'vhfkey.pdb')",
-  "/MAP:$(Join-Path $output 'vhfkey.map')",
+  "/PDB:$(Join-Path $output 'vhfhid.pdb')",
+  "/MAP:$(Join-Path $output 'vhfhid.map')",
   '/DEBUG', '/OPT:REF', '/OPT:ICF',
   '/MACHINE:X64',
   # The user-mode CRT is not part of a driver. When the linker pulls it in for the buffer-overflow
@@ -373,7 +373,7 @@ if ($entrySymbol -eq 'unresolved') {
 # for the string, found nothing, and so reported a correct build as broken. Asking for a table the system
 # does not provide is an access violation on the first framework call, which is what a version mismatch
 # produced.
-$mapFile = Join-Path $output 'vhfkey.map'
+$mapFile = Join-Path $output 'vhfhid.map'
 $linkedTable = $null
 if (Test-Path $mapFile) {
   $tableMatch = [regex]::Match((Get-Content $mapFile -Raw), 'WdfFunctions_(\d{5})')
@@ -439,19 +439,19 @@ if ($minVersion -ne $minor) {
 # ---------------------------------------------------------------------------------------------
 Step '3c. place the verified binary where the INF will find it'
 # ---------------------------------------------------------------------------------------------
-# The INF copies vhfkey.sys from the driver directory, not from out/, so the two have to be the same
+# The INF copies vhfhid.sys from the driver directory, not from out/, so the two have to be the same
 # file. Leaving the copy to be done by hand has now caused two crashes: the driver directory held a
 # binary built against KMDF 1.35 while out/ held the corrected 1.31 build, and the package that got
 # installed was the stale one. The build does the copy so that installing what was just built is the
 # only thing it can do.
-$stagedSys = Join-Path $driver 'vhfkey.sys'
+$stagedSys = Join-Path $driver 'vhfhid.sys'
 Copy-Item $sys $stagedSys -Force
 $builtHash = (Get-FileHash $sys -Algorithm SHA256).Hash
 $stagedHash = (Get-FileHash $stagedSys -Algorithm SHA256).Hash
 if ($builtHash -ne $stagedHash) { throw 'staged binary does not match the built one' }
 Write-Output "  staged: $stagedSys  ($([math]::Round((Get-Item $stagedSys).Length/1KB,1)) KB, sha $($stagedHash.Substring(0,16)))"
 # A stale catalog would no longer cover the binary, and the package would be rejected at install time.
-Remove-Item (Join-Path $driver 'vhfkey.cat') -Force -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $driver 'vhfhid.cat') -Force -ErrorAction SilentlyContinue
 Write-Output '  removed the stale catalog; install.ps1 regenerates and signs it'
 
 # ---------------------------------------------------------------------------------------------

@@ -58,6 +58,18 @@ DEFINE_GUID(GUID_DEVINTERFACE_VHFMOUSE,
  * driver-specific knowledge is involved.
  */
 #define VHFKEY_REPORT_SIZE 8
+
+/*
+ * The largest report either device produces.
+ *
+ * This is NOT the length of a report descriptor. The two are easily confused and the confusion is fatal: a
+ * descriptor is around fifty bytes while the report it describes is a handful, so using the descriptor length
+ * as the report length makes the driver copy fifty bytes into a buffer sized for eight. That overflows the
+ * stack buffer, smashing whatever the compiler had placed after it — in the version that held two devices in
+ * one context, it destroyed the saved device pointer, and the fault appeared two instructions later inside a
+ * framework callback, which pointed the investigation at the framework rather than at the arithmetic.
+ */
+#define VHFHID_MAX_REPORT 16
 #define VHFKEY_MODIFIER_INDEX 0
 #define VHFKEY_RESERVED_INDEX 1
 #define VHFKEY_KEYS_INDEX     2

@@ -51,7 +51,7 @@ export const DRIVER_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'interception-in
  * It is also the transport that took the most work to reach: see `components/vhfkey/driver/vhfkey.c` for
  * the four faults that had to be fixed before the driver would load at all.
  */
-export const VIRTUAL_KEYBOARD_CLIENT = resolve(PLUGIN_ROOT, 'components', 'vhfkey', 'out', 'vhfkeyctl.exe')
+export const VIRTUAL_HID_CLIENT = resolve(PLUGIN_ROOT, 'components', 'vhfkey', 'out', 'vhfctl.exe')
 
 /**
  * The input transports available.
@@ -64,7 +64,7 @@ export const VIRTUAL_KEYBOARD_CLIENT = resolve(PLUGIN_ROOT, 'components', 'vhfke
  * `virtualkbd`  submits HID reports to a virtual keyboard device created by our own driver. Verified by
  *               typing into Notepad and reading the document back, byte for byte.
  */
-export const INPUT_TRANSPORTS = ['sendinput', 'driver', 'virtualkbd']
+export const INPUT_TRANSPORTS = ['sendinput', 'driver', 'virtualkbd', 'virtualmouse']
 
 /**
  * Which transport to use for each kind of input, in order of preference, and why.
@@ -83,7 +83,7 @@ export const INPUT_TRANSPORTS = ['sendinput', 'driver', 'virtualkbd']
  * are, not as a fix for a bug that was never theirs.
  */
 export const TRANSPORT_PREFERENCE = {
-  mouse: ['driver', 'sendinput'],
+  mouse: ['virtualmouse', 'driver', 'sendinput'],
   keyboard: ['virtualkbd', 'sendinput', 'driver'],
 }
 
@@ -160,9 +160,9 @@ export async function driverAvailable() {
  * @throws {AutomationError} when the client is missing or the device refuses the input.
  */
 export async function virtualKeyboardInput(action, params = {}, options = {}) {
-  if (!existsSync(VIRTUAL_KEYBOARD_CLIENT)) {
+  if (!existsSync(VIRTUAL_HID_CLIENT)) {
     throw new AutomationError(
-      `虚拟键盘客户端不存在：${VIRTUAL_KEYBOARD_CLIENT}。` +
+      `虚拟键盘客户端不存在：${VIRTUAL_HID_CLIENT}。` +
         '先运行 components/vhfkey/build.ps1 构建，再运行 install-run.ps1 安装驱动。',
     )
   }
@@ -197,7 +197,7 @@ export async function virtualKeyboardInput(action, params = {}, options = {}) {
   let stdout = ''
   let exitCode = 0
   try {
-    const result = await run(VIRTUAL_KEYBOARD_CLIENT, args, {
+    const result = await run(VIRTUAL_HID_CLIENT, args, {
       maxBuffer: 4 * 1024 * 1024,
       timeout: options.timeoutMs ?? 60_000,
       windowsHide: true,
@@ -228,6 +228,103 @@ export async function virtualKeyboardAvailable() {
   try {
     await virtualKeyboardInput('probe')
     return { available: true, reason: null }
+  } catch (error) {
+    return { available: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+/**
+ * Send pointer input through the virtual HID mouse.
+ *
+ * The same client drives both devices; this selects the mouse actions. Positions are absolute screen pixels
+ * and the client converts them to the 0..32767 range the device's descriptor declares, so a caller works in
+ * the same coordinates it uses everywhere else.
+ *
+ * The client refuses to run a move whose result it cannot confirm and exits non-zero on a rejected report, so
+ * a resolved promise means the device accepted the input rather than that a request was queued.
+ *
+ * @param {'probe'|'move'|'click'|'dblclick'|'down'|'up'|'scroll'} action - what to send.
+ * @param {object} [params] - `{ x, y, button, count, notches }`.
+ * @returns {Promise<object>} `{ ok, action, exitCode }`.
+ * @throws {AutomationError} when the client is missing or the device refuses the input.
+ */
+export async function virtualMouseInput(action, params = {}, options = {}) {
+  if (!existsSync(VIRTUAL_HID_CLIENT)) {
+    throw new AutomationError(
+      `虚拟 HID 客户端不存在：${VIRTUAL_HID_CLIENT}。` +
+        '先运行 components/vhfkey/build.ps1 构建，再运行 install-run.ps1 安装驱动。',
+    )
+  }
+
+  const args = []
+  switch (action) {
+    case 'probe':
+      args.push('probe')
+      break
+    case 'move':
+      if (!Number.isFinite(params.x) || !Number.isFinite(params.y)) {
+        throw new AutomationError('move 需要数字的 x 与 y')
+      }
+      args.push('move', String(Math.round(params.x)), String(Math.round(params.y)))
+      break
+    case 'click':
+    case 'dblclick':
+      args.push(action)
+      if (Number.isFinite(params.x) && Number.isFinite(params.y)) {
+        args.push(String(Math.round(params.x)), String(Math.round(params.y)))
+      }
+      if (params.button !== undefined) args.push('--button', String(params.button))
+      if (Number.isFinite(params.count) && params.count > 1) args.push('--count', String(Math.round(params.count)))
+      break
+    case 'down':
+    case 'up':
+      args.push(action)
+      if (params.button !== undefined) args.push(String(params.button))
+      break
+    case 'scroll':
+      if (!Number.isFinite(params.notches)) {
+        throw new AutomationError('scroll 需要数字的 notches')
+      }
+      args.push('scroll', String(Math.round(params.notches)))
+      break
+    default:
+      throw new AutomationError(`虚拟鼠标不支持的动作：${action}`)
+  }
+
+  let stdout = ''
+  try {
+    const result = await run(VIRTUAL_HID_CLIENT, args, {
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: options.timeoutMs ?? 60_000,
+      windowsHide: true,
+      encoding: 'buffer',
+    })
+    stdout = result.stdout.toString('utf8').replace(/^\uFEFF/, '').trim()
+  } catch (error) {
+    const exitCode = typeof error?.code === 'number' ? error.code : 1
+    stdout = (error?.stdout ?? Buffer.alloc(0)).toString('utf8').trim()
+    const stderr = (error?.stderr ?? Buffer.alloc(0)).toString('utf8').trim()
+    const hint = exitCode === 2 ? '（驱动未安装，或鼠标设备未启动）' : ''
+    throw new AutomationError(`虚拟鼠标动作 ${action} 失败：${stderr || stdout || '(无输出)'}${hint}`)
+  }
+
+  return { ok: true, action, detail: stdout || null }
+}
+
+/**
+ * Is the virtual mouse usable right now?
+ *
+ * The client reports whether it can open the mouse device, which is the question that matters: the driver
+ * can be installed and the node present while the interface is not created, and only opening it tells the
+ * two apart.
+ *
+ * @returns {Promise<{available: boolean, reason: string|null}>} availability.
+ */
+export async function virtualMouseAvailable() {
+  try {
+    const result = await virtualMouseInput('probe')
+    // The probe reports both devices; the mouse is available only if it says so.
+    const available = typeof result.detail === 'string' && /mouse=yes/.test(result.detail)
+    return { available, reason: available ? null : 'the client did not report a mouse device' }
   } catch (error) {
     return { available: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -610,36 +707,49 @@ export async function click(spec) {
   // The driver path is attempted first and falls back to SendInput on any failure, so a machine
   // without the driver — or one where it rejects the request — still works rather than failing the
   // whole action. The fallback is reported so a caller can tell which transport actually ran.
-  if (spec.transport !== 'sendinput') {
+  // The virtual mouse is tried first: it is a real HID device, so nothing above the HID layer can treat its
+  // input as synthetic, and its absolute positioning is accurate to within a pixel. The Interception filter
+  // follows, then SendInput, so a machine without the virtual device still works and the transport that ran
+  // is reported rather than assumed.
+  const order = spec.transport
+    ? [spec.transport]
+    : TRANSPORT_PREFERENCE.mouse
+  const failures = []
+
+  for (const transport of order) {
     try {
-      await driverInput('move', { X: Math.round(x), Y: Math.round(y) })
-      await driverInput('click', { X: Math.round(x), Y: Math.round(y), Button: button, Count: count })
-      const at = await desktop('cursor')
-      return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'driver' }
+      if (transport === 'virtualmouse') {
+        await virtualMouseInput('move', { x, y })
+        // A double click is requested as such, so the device sends a real double-click sequence rather than
+        // two clicks that the target may or may not pair up.
+        await virtualMouseInput(count > 1 && spec.double === true ? 'dblclick' : 'click', {
+          x,
+          y,
+          button,
+          count,
+        })
+        const at = await desktop('cursor')
+        return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'virtualmouse' }
+      }
+      if (transport === 'driver') {
+        await driverInput('move', { X: Math.round(x), Y: Math.round(y) })
+        await driverInput('click', { X: Math.round(x), Y: Math.round(y), Button: button, Count: count })
+        const at = await desktop('cursor')
+        return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'driver' }
+      }
+      if (transport === 'sendinput') {
+        await desktop('move', { X: Math.round(x), Y: Math.round(y), Duration: spec.travel ?? 0.05 })
+        await desktop('click', { X: Math.round(x), Y: Math.round(y), Button: button, Count: count })
+        const at = await desktop('cursor')
+        return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'sendinput' }
+      }
+      throw new AutomationError(`未知的输入传输：${transport}`)
     } catch (error) {
-      if (spec.transport === 'driver') throw error
-      // Fall through to SendInput, keeping the reason so it is not lost.
-      spec.fallbackReason = error instanceof Error ? error.message : String(error)
+      failures.push(`${transport}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
-  await desktop('move', { X: Math.round(x), Y: Math.round(y), Duration: spec.travel ?? 0.05 })
-  await desktop('click', {
-    X: Math.round(x),
-    Y: Math.round(y),
-    Button: button,
-    Count: count,
-  })
-
-  const at = await desktop('cursor')
-  return {
-    x: at.x,
-    y: at.y,
-    owner: owner.handle === undefined ? null : owner,
-    front,
-    transport: 'sendinput',
-    driverError: spec.fallbackReason ?? null,
-  }
+  throw new AutomationError(`所有鼠标传输都失败：${failures.join(' | ')}`)
 }
 
 /**
