@@ -67,3 +67,9 @@ tmp/kd-*.txt
 # Windows SDK installer: a 1.3 MB download used once to obtain the debuggers, kept locally.
 vendor/dbg/
 
+
+# MSBuild driver build: object files and the intermediate tree, reproducible from the sources.
+components/vhfkey/driver/x64/
+components/vhfkey/driver/Release/
+*.vcxproj.user
+

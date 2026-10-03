@@ -232,8 +232,38 @@ $linkArgs = @(
   # characteristics 0x22 rather than 0x2022, and the loader takes the wrong path for it. The symptom is
   # a bugcheck 0x7E — SYSTEM_THREAD_EXCEPTION_NOT_HANDLED with an access violation — the moment the
   # driver package is installed, before any device node exists. Dumpbin names it plainly:
-  # "File Type: EXECUTABLE IMAGE". This cost four machine crashes to find, so it is spelled out here.
-  '/nologo', '/DRIVER', '/DLL', '/SUBSYSTEM:NATIVE', '/ENTRY:DriverEntry',
+  # "File Type: EXECUTABLE IMAGE".
+  #
+  # The entry point is left to the libraries, and that is deliberate: for a KMDF driver it must be
+  # FxDriverEntry, as the WDK's own KMDF integration states —
+  #
+  #   <EntryPointSymbol>FxDriverEntry</EntryPointSymbol>
+  #
+  # FxDriverEntry lives in WdfDriverEntry.lib and is what fills in WdfDriverGlobals and the version's
+  # function table before the driver's DriverEntry is called. Passing /ENTRY:DriverEntry instead (which
+  # this script used to do) makes the driver's own DriverEntry the entry point, so none of that
+  # initialisation runs, the globals stay null, and the first framework call dereferences a null class
+  # pointer:
+  #
+  #   vhfkey!WdfDriverCreate+0x52:
+  #     mov  r10, qword ptr [vhfkey!WdfFunctions_01031]   <- null
+  #     call qword ptr [r10+rax]                          <- fault
+  #
+  # The entry point must be the framework's, not the driver's own. WdfDriverEntry.lib defines
+  # FxDriverEntry, and it is what fills in WdfDriverGlobals and the version's function table before
+  # calling the driver's DriverEntry. Naming DriverEntry here — which this script used to do — means none
+  # of that initialisation runs, the globals stay null, and the first framework call faults:
+  #
+  #   vhfkey!WdfDriverCreate+0x52:
+  #     mov  rcx, qword ptr [vhfkey!WdfDriverGlobals]     <- null
+  #     mov  r10, qword ptr [vhfkey!WdfFunctions_01031]   <- null
+  #     call qword ptr [r10+rax]                          <- fault
+  #
+  # The debugger calls this "AV.Dereference: NullClassPtr" and the bugcheck is 0x7E. Leaving the entry
+  # point unspecified is not a fix either: the linker then picks its own, the framework code is never
+  # referenced, and the image collapses to a 5 KB stub with no WDF machinery — which is why FxDriverEntry
+  # is named explicitly rather than left to a default.
+  '/nologo', '/DRIVER', '/DLL', '/SUBSYSTEM:NATIVE', '/ENTRY:FxDriverEntry',
   "/LIBPATH:$kmLib",
   "/LIBPATH:$kmdfLib",
   "/LIBPATH:$msvcLib",
@@ -284,6 +314,29 @@ if ($machine -ne 0x8664) { $problems += "machine is 0x$($machine.ToString('X4'))
 if ($subsystem -ne 1) { $problems += "subsystem is $subsystem, expected 1 (native)" }
 if (-not ($characteristics -band 0x2000)) {
   $problems += "IMAGE_FILE_DLL (0x2000) is not set — characteristics are 0x$($characteristics.ToString('X4')); a kernel driver must link with /DLL"
+}
+
+# The entry point must be the framework's, not the driver's own. The map file names whatever the linker
+# chose, so the check is exact rather than a guess, and a driver built with /ENTRY:DriverEntry is
+# rejected here instead of at load time with a null class pointer.
+$entryRva = [BitConverter]::ToUInt32($image, $peOffset + 0x28)
+$entrySymbol = 'unresolved'
+# Asking dumpbin for the name is authoritative. Deriving it from the map file is not: the map lists
+# section-relative offsets (0001:00001a28) while the PE header holds an RVA (0x2A28), so the two differ by
+# the section's virtual address. An earlier version of this check ignored that and reported a correct
+# build as unresolved.
+$dumpbin = Get-ChildItem 'C:\BuildTools' -Recurse -Filter 'dumpbin.exe' -ErrorAction SilentlyContinue |
+  Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+if ($null -ne $dumpbin) {
+  $headersOut = & $dumpbin.FullName /headers $sys 2>&1 | Out-String
+  $entryMatch = [regex]::Match($headersOut, '(?m)^\s*[0-9A-F]+\s+entry point\s+\([0-9A-F]+\)\s+(\S+)')
+  if ($entryMatch.Success) { $entrySymbol = $entryMatch.Groups[1].Value }
+}
+Write-Output "  entry point:     RVA 0x$('{0:X8}' -f $entryRva)  -> $entrySymbol"
+if ($entrySymbol -eq 'unresolved') {
+  Write-Output '  entry point:     could not be resolved; the name check is skipped'
+} elseif ($entrySymbol -ne 'FxDriverEntry') {
+  $problems += "the entry point is $entrySymbol, but a KMDF driver's must be FxDriverEntry — without it WdfDriverGlobals is never initialised and the first framework call faults"
 }
 
 # The framework version table is identified by the symbol WdfFunctions_01031, and it is listed in the
