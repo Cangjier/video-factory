@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "material",
+    "preset": "vertical-short",
+    "quality": "high"
+  },
+  "audio": {
+    "music": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\material\\bgm.wav",
+    "music_gain_db": -20,
+    "duck": true,
+    "fade_in": 0.5,
+    "fade_out": 2.0,
+    "keep_scene_audio": false,
+    "voiceover": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\narration\\voiceover.mp3"
+  },
+  "subtitles": {
+    "enabled": true,
+    "source": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\narration\\voiceover.srt",
+    "burn": true
+  },
+  "scenes": [
+    {
+      "kind": "image",
+      "source": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\material\\01_开场.jpg",
+      "duration": 7.68,
+      "motion": "zoom-in"
+    },
+    {
+      "kind": "image",
+      "source": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\material\\02_问题.jpg",
+      "duration": 7.68,
+      "motion": "pan-right",
+      "transition": {
+        "type": "fade",
+        "duration": 0.5
+      }
+    },
+    {
+      "kind": "image",
+      "source": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\material\\03_转折.jpg",
+      "duration": 7.68,
+      "motion": "zoom-out",
+      "transition": {
+        "type": "fade",
+        "duration": 0.5
+      }
+    },
+    {
+      "kind": "image",
+      "source": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\material\\05_结果.jpg",
+      "duration": 7.68,
+      "motion": "pan-left",
+      "transition": {
+        "type": "fade",
+        "duration": 0.5
+      }
+    },
+    {
+      "kind": "image",
+      "source": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\material\\06_收尾.jpg",
+      "duration": 7.68,
+      "motion": "kenburns",
+      "transition": {
+        "type": "fade",
+        "duration": 0.5
+      }
+    }
+  ]
+}

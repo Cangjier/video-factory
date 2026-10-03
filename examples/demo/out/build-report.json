@@ -1,0 +1,63 @@
+{
+  "output": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\final.mp4",
+  "cover": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\cover.jpg",
+  "contactSheet": "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\contact-sheet.jpg",
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "duration": 18.5,
+    "pixFmt": "yuv420p",
+    "videoCodec": "h264",
+    "audioCodec": "aac",
+    "hasAudio": true,
+    "sizeBytes": 1909504,
+    "bitRate": 825731
+  },
+  "preset": "vertical-short",
+  "quality": "medium",
+  "sceneCount": 6,
+  "plannedDuration": 18.5,
+  "title": "video-factory demo",
+  "stages": [
+    {
+      "name": "normalize",
+      "seconds": 20.34,
+      "detail": "6 个镜头",
+      "outputs": [
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\scenes\\000_s01.mp4",
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\scenes\\001_s02.mp4",
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\scenes\\002_s03.mp4",
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\scenes\\003_s04.mp4",
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\scenes\\004_s05.mp4",
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\scenes\\005_s06.mp4"
+      ]
+    },
+    {
+      "name": "assemble",
+      "seconds": 3.01,
+      "detail": "6 个镜头带转场",
+      "outputs": [
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\.work\\timeline.mp4"
+      ]
+    },
+    {
+      "name": "finalize",
+      "seconds": 8.71,
+      "detail": "18.5s 成片（字幕已烧录）",
+      "outputs": [
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\final.mp4"
+      ]
+    },
+    {
+      "name": "deliver",
+      "seconds": 0.82,
+      "detail": "封面与缩略图",
+      "outputs": [
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\cover.jpg",
+        "C:\\Users\\Admin\\Documents\\GitHub\\video-factory\\examples\\demo\\out\\contact-sheet.jpg"
+      ]
+    }
+  ],
+  "problems": []
+}

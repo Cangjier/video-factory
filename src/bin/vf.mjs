@@ -1,0 +1,315 @@
+#!/usr/bin/env node
+/**
+ * The optional command line.
+ *
+ * It exposes the same operations the `video_*` tools do, for two reasons: a stage can
+ * be debugged without an agent in the loop, and the test suite can exercise the real
+ * code paths. It deliberately has no one-shot "make me a video" subcommand — sequencing
+ * is the caller's job, which is the whole point of the plugin's design.
+ *
+ * Usage: node src/bin/vf.mjs <command> [options]
+ *
+ * @module video-factory/bin
+ */
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { parseArgs } from 'node:util'
+import { capabilitiesOf, resolveBinary, versionOf, vendoredBuild } from '../core/env.mjs'
+import { installFfmpeg, vendoredState } from '../core/install.mjs'
+import { describe as describeInventory, inventoryToJson, scan } from '../core/materials.mjs'
+import { estimatedDuration, fieldReference, loadResolvedPlan } from '../core/plan.mjs'
+import { probe } from '../core/probe.mjs'
+import { build } from '../core/pipeline.mjs'
+import { assemble } from '../core/assemble.mjs'
+import { deliver } from '../core/deliver.mjs'
+import { finalize } from '../core/finalize.mjs'
+import { clipPath, renderScene } from '../core/scene.mjs'
+import { synthesize } from '../core/tts.mjs'
+import { formatSrt, wordsToCues } from '../core/srt.mjs'
+import { makeTestMaterial } from './make-test-material.mjs'
+
+/** Print a JSON result. */
+const emit = (value) => console.log(JSON.stringify(value, null, 2))
+
+/** Resolve the out/work directories for a render command. */
+function renderDirs(plan, options) {
+  const outDir = options.out === undefined ? join(plan.baseDir, 'output') : resolve(options.out)
+  const workDir = options.work === undefined ? join(outDir, '.work') : resolve(options.work)
+  return { outDir, workDir }
+}
+
+const COMMANDS = {
+  /**
+   * Report the environment, mirroring `video_env {action:"probe"}`.
+   */
+  async doctor() {
+    const problems = []
+    const ffmpeg = resolveBinary('ffmpeg', null)
+    const ffprobe = resolveBinary('ffprobe', null)
+    if (ffmpeg === null) problems.push('找不到 ffmpeg')
+    if (ffprobe === null) problems.push('找不到 ffprobe')
+
+    const report = {
+      ok: problems.length === 0,
+      node: process.version,
+      platform: `${process.platform} ${process.arch}`,
+      ffmpeg: ffmpeg === null ? { found: false } : { found: true, path: ffmpeg },
+      ffprobe: ffprobe === null ? { found: false } : { found: true, path: ffprobe },
+      vendored: vendoredBuild(),
+      arkKeyPresent: typeof process.env.ARK_API_KEY === 'string' && process.env.ARK_API_KEY !== '',
+      problems,
+    }
+    if (ffmpeg !== null) {
+      report.ffmpeg.version = await versionOf(ffmpeg)
+      const capabilities = await capabilitiesOf(ffmpeg)
+      report.ffmpeg.encoders = capabilities.encoders
+      report.ffmpeg.filters = capabilities.filters
+      for (const name of ['libx264', 'aac']) {
+        if (!capabilities.encoders.includes(name)) problems.push(`缺少编码器 ${name}`)
+      }
+      for (const name of ['zoompan', 'xfade', 'loudnorm', 'subtitles']) {
+        if (!capabilities.filters.includes(name)) problems.push(`缺少滤镜 ${name}`)
+      }
+      report.ok = problems.length === 0
+    }
+    emit(report)
+    return report.ok ? 0 : 1
+  },
+
+  /** Install ffmpeg into vendor/. */
+  async install(options) {
+    const result = await installFfmpeg({
+      force: options.force === true,
+      onProgress: (message) => console.error(message),
+    })
+    emit({ ...result, state: vendoredState() })
+    return 0
+  },
+
+  /** Inventory a material folder. */
+  async scan(options) {
+    const inventory = await scan(options.path ?? '.', {
+      recursive: options['no-recursive'] !== true,
+      dedupe: options['no-dedupe'] !== true,
+    })
+    if (options.json === true) emit(inventoryToJson(inventory))
+    else {
+      console.log(describeInventory(inventory))
+      console.log()
+      emit(inventory.counts)
+    }
+    return 0
+  },
+
+  /** Print the plan field reference. */
+  async fields() {
+    console.log(fieldReference())
+    return 0
+  },
+
+  /** Validate a plan and report its timeline length. */
+  async check(options) {
+    if (options.plan === undefined) throw new Error('check: --plan <plan.json> is required')
+    const plan = loadResolvedPlan(options.plan)
+    emit({
+      ok: true,
+      canvas: `${plan.width}x${plan.height}@${plan.fps}`,
+      quality: plan.quality,
+      sceneCount: plan.scenes.length,
+      estimatedDuration: Number(estimatedDuration(plan.scenes).toFixed(3)),
+      subtitles: plan.subtitles.enabled ? plan.subtitles.source : null,
+      voiceover: plan.audio.voiceover,
+      music: plan.audio.music,
+    })
+    return 0
+  },
+
+  /** Synthesize narration and write audio, word timings, and an SRT. */
+  async narrate(options) {
+    if (options.text === undefined) throw new Error('narrate: --text <file.txt> is required')
+    const text = readFileSync(options.text, 'utf8')
+    const outDir = resolve(options.out ?? 'narration')
+    const result = await synthesize({ text, voice: options.voice ?? undefined })
+    const audioPath = join(outDir, 'voiceover.mp3')
+    const wordsPath = join(outDir, 'voiceover.words.json')
+    const srtPath = join(outDir, 'voiceover.srt')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(outDir, { recursive: true })
+    writeFileSync(audioPath, result.audio)
+    const cues = wordsToCues(result.words)
+    writeFileSync(wordsPath, `${JSON.stringify({ audio: audioPath, duration: result.duration, words: result.words }, null, 2)}\n`)
+    writeFileSync(srtPath, formatSrt(cues))
+    emit({ audio: audioPath, words: wordsPath, srt: srtPath, duration: Number(result.duration.toFixed(3)), cueCount: cues.length })
+    return 0
+  },
+
+  /** Generate one still image with Seedream and download it. */
+  async image(options) {
+    const key = process.env.ARK_API_KEY
+    if (typeof key !== 'string' || key === '') throw new Error('image: 环境变量 ARK_API_KEY 没有设置')
+    if (typeof options.prompt !== 'string' || options.prompt === '') {
+      throw new Error('image: --prompt "<画面描述>" is required')
+    }
+    const { DEFAULT_IMAGE_MODEL, generateImage } = await import('../core/ark.mjs')
+    const result = await generateImage(
+      { prompt: options.prompt, size: options.size, watermark: options.watermark },
+      {
+        apiKey: key,
+        baseUrl: options.base ?? undefined,
+        model: options.model ?? DEFAULT_IMAGE_MODEL,
+        outDir: resolve(options.out ?? 'generated'),
+        fileName: options.name,
+        onProgress: (event) => {
+          if (event.message !== undefined) console.error(`  ${event.phase}: ${event.message}`)
+        },
+      },
+    )
+    emit(result)
+    return 0
+  },
+
+  /** List the image models this account can see. */
+  async 'image-models'() {
+    const key = process.env.ARK_API_KEY
+    if (typeof key !== 'string' || key === '') throw new Error('image-models: 环境变量 ARK_API_KEY 没有设置')
+    const { listModels } = await import('../core/ark.mjs')
+    emit(await listModels({ apiKey: key, filter: 'seedream' }))
+    return 0
+  },
+
+  /** Inspect one or more media files. */
+  async probe(options) {
+    const paths = options.paths ?? []
+    if (paths.length === 0) throw new Error('probe: at least one path is required')
+    const records = []
+    for (const path of paths) records.push(await probe(resolve(path)))
+    emit(records.length === 1 ? records[0] : records)
+    return 0
+  },
+
+  /** Render one stage, or the whole chain with --all. */
+  async render(options) {
+    if (options.plan === undefined) throw new Error('render: --plan <plan.json> is required')
+    const plan = loadResolvedPlan(options.plan)
+    if (options.quality !== undefined) plan.quality = options.quality
+    const { outDir, workDir } = renderDirs(plan, options)
+    const onProgress = (event) => {
+      if (event.phase === 'scene') console.error(`  scene ${event.sceneId}`)
+    }
+
+    if (options.all === true) {
+      emit(await build(plan, { outDir, workDir, force: options.force === true, onProgress }))
+      return 0
+    }
+    if (options.scene !== undefined) {
+      const index = plan.scenes.findIndex((scene) => scene.id === options.scene)
+      if (index < 0) throw new Error(`render: no scene with id ${options.scene}`)
+      emit(await renderScene(plan.scenes[index], plan, index, { workDir, force: options.force === true }))
+      return 0
+    }
+    if (options.assemble === true) {
+      const clips = plan.scenes.map((scene, index) => clipPath(workDir, index, scene.id))
+      emit(await assemble(clips, plan, { workDir, force: options.force === true }))
+      return 0
+    }
+    if (options.finalize === true) {
+      const timeline = join(workDir, 'timeline.mp4')
+      emit(await finalize(timeline, plan, { workDir, outDir, force: options.force === true }))
+      return 0
+    }
+    if (options.deliver === true) {
+      emit(await deliver(join(outDir, 'final.mp4'), plan, { outDir }))
+      return 0
+    }
+    throw new Error('render: choose one of --all, --scene <id>, --assemble, --finalize, --deliver')
+  },
+
+  /** Synthesize test material. */
+  async 'make-test-material'(options) {
+    if (options.dir === undefined) throw new Error('make-test-material: --dir <folder> is required')
+    const result = await makeTestMaterial(resolve(options.dir), {
+      sceneCount: options.scenes === undefined ? 6 : Number(options.scenes),
+      seconds: options.seconds === undefined ? 12 : Number(options.seconds),
+    })
+    emit(result)
+    return 0
+  },
+}
+
+async function main() {
+  const [command, ...rest] = process.argv.slice(2)
+  if (command === undefined || command === '--help' || command === '-h') {
+    console.log(`video-factory — 确定性媒体工具
+
+用法：node src/bin/vf.mjs <命令> [选项]
+
+命令：
+  doctor                             检查 ffmpeg / ffprobe 与云端 Key
+  install [--force]                  把 ffmpeg 装进 vendor/
+  scan <目录> [--json] [--no-dedupe] 盘点素材
+  fields                             打印 plan.json 字段速查
+  check --plan <plan.json>           校验计划并报时长
+  narrate --text <文案.txt> [--out <目录>] [--voice <音色>]
+  probe <文件…>                      查看媒体流信息
+  image --prompt "…" [--size 2k] [--out <目录>] [--name <文件名>] [--model <模型>]
+  image-models                       列出可用的图像模型
+  render --plan <plan.json> --all | --scene <id> | --assemble | --finalize | --deliver
+  make-test-material --dir <目录> [--scenes 6] [--seconds 12]
+
+没有"一键出片"命令：顺序编排是调用方的职责，这正是本插件的设计。`)
+    return 0
+  }
+
+  const handler = COMMANDS[command]
+  if (handler === undefined) {
+    console.error(`未知命令：${command}（可用：${Object.keys(COMMANDS).join(', ')}）`)
+    return 1
+  }
+
+  const { values, positionals } = parseArgs({
+    args: rest,
+    allowPositionals: true,
+    strict: false,
+    options: {
+      plan: { type: 'string' },
+      out: { type: 'string' },
+      work: { type: 'string' },
+      text: { type: 'string' },
+      voice: { type: 'string' },
+      quality: { type: 'string' },
+      scene: { type: 'string' },
+      dir: { type: 'string' },
+      scenes: { type: 'string' },
+      seconds: { type: 'string' },
+      prompt: { type: 'string' },
+      size: { type: 'string' },
+      name: { type: 'string' },
+      model: { type: 'string' },
+      base: { type: 'string' },
+      json: { type: 'boolean' },
+      force: { type: 'boolean' },
+      watermark: { type: 'boolean' },
+      all: { type: 'boolean' },
+      assemble: { type: 'boolean' },
+      finalize: { type: 'boolean' },
+      deliver: { type: 'boolean' },
+      'no-dedupe': { type: 'boolean' },
+      'no-recursive': { type: 'boolean' },
+    },
+  })
+
+  const options = { ...values }
+  if (positionals.length > 0) {
+    if (command === 'scan') options.path = positionals[0]
+    else options.paths = positionals
+  }
+
+  try {
+    return await handler(options)
+  } catch (error) {
+    console.error(`错误：${error instanceof Error ? error.message : String(error)}`)
+    return 1
+  }
+}
+
+process.exit(await main())

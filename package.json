@@ -1,0 +1,33 @@
+{
+  "name": "video-factory",
+  "version": "2.0.0",
+  "private": true,
+  "description": "DSH 插件：把素材确定性地渲染成成片。插件只提供确定性工具，流程与创作决策全部由 DSH 负责。",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.mjs",
+    "./core": "./src/core/index.mjs",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.mjs",
+    "src",
+    "cordis.patch.yml",
+    "docs",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "check": "node --check index.mjs"
+  }
+}

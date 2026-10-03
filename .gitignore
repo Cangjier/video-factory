@@ -1,0 +1,41 @@
+# Node
+node_modules/
+*.log
+
+# Vendored binaries: fetched by `video_env {action:"install_ffmpeg"}`, and far too large
+# to track. SOURCE.json records the url and sha256 of whatever was installed.
+#
+# The archive is listed separately because the directory rule does not match it: the
+# download lands beside the extraction directory, not inside it, and leaving it out
+# pulled a ~194 MB zip into the first commit.
+vendor/ffmpeg/
+vendor/ffmpeg-*.zip
+vendor/*.zip
+vendor/*.7z
+
+# Generated stills: reproducible from their prompts, and the point of them is to be
+# produced again, not stored.
+generated/
+
+# Scratch space: smoke scripts, throwaway renders, generated test material.
+tmp/
+
+# Registry-hive transaction logs that sit beside the BCD export. They are transient, and a
+# half-written one in the index is worse than none.
+*.bcd.LOG1
+*.bcd.LOG2
+
+# Local machine state: recorded for the driver work, but it carries this host's address and
+# is meaningless anywhere else.
+vendor/interception/pre-reboot-state.json
+
+# Render output. The demo's out/ is committed on purpose as a working reference, so it
+# is re-included below; the intermediate .work/ directory inside it is not.
+**/output/
+**/.work/
+
+# Generated narration: reproducible from the script text, and a few hundred kilobytes
+# of audio each time.
+**/narration/voiceover.mp3
+**/narration/voiceover.words.json
+**/narration/voiceover.cues.json

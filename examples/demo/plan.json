@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "video-factory demo",
+    "preset": "vertical-short",
+    "quality": "medium"
+  },
+  "audio": {
+    "music": "material/bgm.wav",
+    "music_gain_db": -20,
+    "duck": true,
+    "fade_in": 0.5,
+    "fade_out": 2.0,
+    "keep_scene_audio": false
+  },
+  "subtitles": {
+    "enabled": true,
+    "source": "narration/voiceover.srt",
+    "burn": true,
+    "font_size": 44,
+    "margin_v": 200
+  },
+  "scenes": [
+    { "id": "s01", "kind": "image", "source": "material/01_开场.jpg", "duration": 3.5, "motion": "zoom-in" },
+    { "id": "s02", "kind": "image", "source": "material/02_问题.jpg", "duration": 3.5, "motion": "pan-right", "transition": { "type": "fade", "duration": 0.5 } },
+    { "id": "s03", "kind": "image", "source": "material/03_转折.jpg", "duration": 3.5, "motion": "zoom-out", "transition": { "type": "fade", "duration": 0.5 } },
+    { "id": "s04", "kind": "image", "source": "material/04_方法.jpg", "duration": 3.5, "motion": "pan-left", "transition": { "type": "fade", "duration": 0.5 } },
+    { "id": "s05", "kind": "image", "source": "material/05_结果.jpg", "duration": 3.5, "motion": "kenburns", "transition": { "type": "fade", "duration": 0.5 } },
+    { "id": "s06", "kind": "image", "source": "material/06_收尾.jpg", "duration": 3.5, "motion": "zoom-in", "transition": { "type": "fade", "duration": 0.5 },
+      "overlays": [{ "text": "素材进，成片出", "anchor": "bottom-center", "font_size": 52, "start": 0.4 }] }
+  ]
+}

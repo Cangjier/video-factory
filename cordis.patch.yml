@@ -1,0 +1,42 @@
+# video-factory bundle patch.
+#
+# 它只贡献一行，且不依赖任何特定 composition：
+#
+#   video-factory  Host 插件：注册 `video_*` 工具。需要 `tools` 服务，
+#                  在挂载了 @deepseek-ai/dsh-tools 的任何 profile 里都安全。
+#
+# 配置分两类：
+#   - 路径类（projectRoot / ffmpegPath）留空即自动推导，换机器不用改
+#   - 密钥类只写环境变量名，Key 本身绝不进配置
+
+- insert:
+    - id: video-factory
+      name: 'video-factory'
+      config:
+        # 工作目录基准。null = 插件自身所在仓库
+        projectRoot: null
+        # ffmpeg/ffprobe 显式路径。null = env → vendor/ffmpeg/bin → PATH 依次发现
+        ffmpegPath: null
+        ffprobePath: null
+        # 中间产物路径长度上限（Windows 260 字符限制，留足余量）
+        pathBudget: 200
+
+        # 字节跳动火山方舟（唯一的云生成后端）
+        ark:
+          # Key 放环境变量，不写进配置
+          apiKeyEnv: ARK_API_KEY
+          # null = 用内置默认；区域/工作区不同才需要改
+          baseUrl: null
+          # 见 docs/插件设计规格.md §7.2。留空则自动发现可用模型
+          defaultModel: null
+          # 图像生成（Seedream）的默认模型。留空则用插件内置的缺省值
+          imageModel: null
+          pollIntervalSeconds: 15
+          maxWaitSeconds: 900
+
+        # Edge TTS（无需 Key）
+        tts:
+          voice: zh-CN-XiaoxiaoNeural
+          rate: '+0%'
+          pitch: '+0Hz'
+          volume: '+0%'
