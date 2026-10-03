@@ -22,6 +22,7 @@ import {
   TRANSPORT_PREFERENCE,
   driverAvailable,
   virtualKeyboardAvailable,
+  virtualMouseAvailable,
 } from '../core/automation.mjs'
 import { VideoFactoryError } from './shared.mjs'
 
@@ -105,6 +106,7 @@ export function createEnvActions(config, logger) {
        * actually started.
        */
       const virtualKeyboard = await virtualKeyboardAvailable()
+      const virtualMouse = await virtualMouseAvailable()
       const filter = await driverAvailable()
       report.input = {
         transports: INPUT_TRANSPORTS,
@@ -114,6 +116,11 @@ export function createEnvActions(config, logger) {
           reason: virtualKeyboard.reason,
           note: '自研 VHF 虚拟 HID 键盘；作为真实设备进入输入栈，应用无法与物理键盘区分。',
         },
+        virtualMouse: {
+          available: virtualMouse.available,
+          reason: virtualMouse.reason,
+          note: '自研 VHF 虚拟 HID 鼠标；绝对定位，实测误差不超过 1 像素，左右键与滚轮均可用。',
+        },
         filterDriver: {
           available: filter.available,
           reason: filter.reason,
@@ -121,10 +128,14 @@ export function createEnvActions(config, logger) {
         },
         sendInput: { available: true, note: 'Win32 SendInput；无需安装，始终可用。' },
       }
-      if (!virtualKeyboard.available) {
+      if (!virtualKeyboard.available || !virtualMouse.available) {
+        const missing = [
+          virtualKeyboard.available ? null : '键盘',
+          virtualMouse.available ? null : '鼠标',
+        ].filter(Boolean).join('与')
         report.notes = [
           ...(report.notes ?? []),
-          `虚拟 HID 键盘不可用（${virtualKeyboard.reason}）。键盘输入将回退到 SendInput。` +
+          `虚拟 HID ${missing}不可用。输入将回退到 Interception 或 SendInput。` +
             '安装方式：先运行 components/vhfkey/build.ps1，再运行 components/vhfkey/install-run.ps1。',
         ]
       }

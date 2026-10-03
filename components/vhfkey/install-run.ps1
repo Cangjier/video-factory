@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Continue'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $component = Join-Path $root 'components\vhfkey'
 $driverDir = Join-Path $component 'driver'
-$sys = Join-Path $driverDir 'vhfkey.sys'
+$sys = Join-Path $driverDir 'vhfhid.sys'
 $log = Join-Path $component 'install-run.log'
 
 function Say($text) {
@@ -40,7 +40,7 @@ $machine = [BitConverter]::ToUInt16($image, $pe + 4)
 $isDll = ($chars -band 0x2000) -ne 0
 Say "  machine 0x$($machine.ToString('X4'))   characteristics 0x$($chars.ToString('X4'))   DLL=$isDll"
 
-$mapTable = [regex]::Match((Get-Content (Join-Path $component 'out\vhfkey.map') -Raw), 'WdfFunctions_(\d{5})')
+$mapTable = [regex]::Match((Get-Content (Join-Path $component 'out\vhfhid.map') -Raw), 'WdfFunctions_(\d{5})')
 $linkedMinor = if ($mapTable.Success) { [int]$mapTable.Groups[1].Value.Substring(2) } else { -1 }
 $sysMinor = Get-KmdfMinor
 Say "  KMDF linked=$linkedMinor  system=$sysMinor"
@@ -62,7 +62,7 @@ foreach ($d in $devices) {
   Say ((& pnputil /remove-device $d.InstanceId 2>&1) -join "`n")
 }
 $enum = & pnputil /enum-drivers 2>&1 | Out-String
-foreach ($block in ($enum -split "(?m)^\s*$" | Where-Object { $_ -match 'vhfkey' })) {
+foreach ($block in ($enum -split "(?m)^\s*$" | Where-Object { $_ -match 'vhfkey|vhfhid' })) {
   $name = ([regex]::Match($block, 'Published Name:\s*(\S+)')).Groups[1].Value
   if ($name) {
     Say "  deleting package $name"
@@ -70,12 +70,12 @@ foreach ($block in ($enum -split "(?m)^\s*$" | Where-Object { $_ -match 'vhfkey'
   }
 }
 
-$leftovers = @(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' })
+$leftovers = @(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' -or $_.Name -like 'vhfhid*' })
 if ($leftovers.Count -gt 0) {
   Say "  removing $($leftovers.Count) leftover store director(ies)"
   foreach ($l in $leftovers) { Remove-Item $l.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
-Say "  store is clean: $((@(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' })).Count -eq 0)"
+Say "  store is clean: $((@(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' -or $_.Name -like 'vhfhid*' })).Count -eq 0)"
 
 # The binary the INF installs is the one in the driver directory, which is not where the build writes its
 # output. A mismatch there has already sent a stale, crashing binary to the driver store twice, so the two
@@ -87,8 +87,8 @@ Say "  store is clean: $((@(Get-ChildItem 'C:\Windows\System32\DriverStore\FileR
 # guarantees the staged binary is this build's.
 Say ''
 Say '  restoring the staged binary from the build output:'
-$built = Join-Path $component 'out\vhfkey.sys'
-$staged = Join-Path $driverDir 'vhfkey.sys'
+$built = Join-Path $component 'out\vhfhid.sys'
+$staged = Join-Path $driverDir 'vhfhid.sys'
 if (-not (Test-Path $built)) { Say '  no build output; run build.ps1 first'; exit 5 }
 Copy-Item $built $staged -Force
 $builtHash = (Get-FileHash $built -Algorithm SHA256).Hash
@@ -110,7 +110,7 @@ Say '=== 3. sign the package ==='
 # information".
 $inf2cat = Get-ChildItem (Join-Path $root 'vendor\wdk\tools\c\bin') -Recurse -Filter 'Inf2Cat.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -eq $inf2cat) { Say '  Inf2Cat.exe not found; the catalog cannot be generated'; exit 5 }
-$cat = Join-Path $driverDir 'vhfkey.cat'
+$cat = Join-Path $driverDir 'vhfhid.cat'
 Remove-Item $cat -Force -ErrorAction SilentlyContinue
 Say '  generating the catalog:'
 Say ((& $inf2cat.FullName /driver:"$driverDir" /os:10_X64 2>&1 | Select-Object -Last 3) -join "`n")
@@ -132,11 +132,11 @@ Say "  note: signing grew the binary from $((Get-Item $built).Length) to $((Get-
 
 Say ''
 Say '=== 4. publish the driver package ==='
-Say ((& pnputil /add-driver (Join-Path $driverDir 'vhfkey.inf') /install 2>&1) -join "`n")
+Say ((& pnputil /add-driver (Join-Path $driverDir 'vhfhid.inf') /install 2>&1) -join "`n")
 
 Say ''
 Say '=== 5. confirm the store holds the verified build ==='
-$store = @(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' })
+$store = @(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' -or $_.Name -like 'vhfhid*' })
 foreach ($s in $store) {
   foreach ($f in (Get-ChildItem $s.FullName -Filter '*.sys')) {
     $b = [System.IO.File]::ReadAllBytes($f.FullName)
@@ -149,15 +149,19 @@ foreach ($s in $store) {
 }
 
 Say ''
-Say '=== 6. create the device node ==='
-# This is the step the machine crashed at on previous attempts, so the device is created only after the
-# verified package is in the store.
+Say '=== 6. create the device nodes ==='
+# One node per virtual device. The nodes share a driver binary and a service, and each creates exactly one
+# virtual HID device — the keyboard for root\vhfhidkey, the mouse for root\vhfhidmouse. Creating both from a
+# single node is what an earlier version did, and it faulted inside the framework callback.
 $devcon = Get-ChildItem (Join-Path $root 'vendor\wdk\tools') -Recurse -Filter 'devcon.exe' -ErrorAction SilentlyContinue |
   Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1
 if ($null -eq $devcon) { Say '  devcon.exe not found'; exit 4 }
-$devconOut = & $devcon.FullName install (Join-Path $driverDir 'vhfkey.inf') 'root\vhfkey' 2>&1
-Say "  exit code: $LASTEXITCODE"
-Say (($devconOut | ForEach-Object { "  $_" }) -join "`n")
+foreach ($node in @('root\vhfhidkey', 'root\vhfhidmouse')) {
+  Say "  $node"
+  $devconOut = & $devcon.FullName install (Join-Path $driverDir 'vhfhid.inf') $node 2>&1
+  Say "    exit code: $LASTEXITCODE"
+  Say (($devconOut | ForEach-Object { "    $_" }) -join "`n")
+}
 
 Say ''
 Say '=== 7. result ==='
@@ -171,7 +175,7 @@ if ($after.Count -gt 0) {
 } else {
   Say '  no device appeared'
 }
-$svc = Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'vhfkey' }
-if ($svc) { Say "  service vhfkey: state=$($svc.State) start=$($svc.StartMode)" } else { Say '  service vhfkey: not registered' }
+$svc = Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'vhfhid' }
+if ($svc) { Say "  service vhfhid: state=$($svc.State) start=$($svc.StartMode)" } else { Say '  service vhfhid: not registered' }
 Say ''
 Say "  log: $log"
