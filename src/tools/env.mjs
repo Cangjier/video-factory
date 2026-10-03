@@ -18,7 +18,7 @@ export function createEnvTool(actions) {
     description:
       'video-factory environment and material inventory. Use it before any other video_* tool to confirm ffmpeg is available, and to turn a material folder into a structured list before deciding what the video should contain.',
     actionsHelp:
-      'probe: report ffmpeg/ffprobe paths and versions, available encoders and filters, Edge TTS reachability, and whether an Ark API key is present. ' +
+      'probe: report ffmpeg/ffprobe paths and versions, available encoders and filters, Edge TTS reachability, whether an Ark API key is present, and which input transports this machine can actually use (a virtual HID keyboard, the Interception filter driver, or Win32 SendInput). ' +
       'presets: list the canvas presets (vertical-short, horizontal, square, landscape-4k, preview). ' +
       'scan: inventory a material folder — every image, video, and audio file with its probe metadata, near-duplicate stills marked (not removed), and unsupported files skipped. ' +
       'This never picks, ranks, or drops material; choosing is yours. ' +

@@ -17,6 +17,12 @@ import {
   scan as scanMaterials,
 } from '../core/materials.mjs'
 import { PRESETS } from '../core/plan.mjs'
+import {
+  INPUT_TRANSPORTS,
+  TRANSPORT_PREFERENCE,
+  driverAvailable,
+  virtualKeyboardAvailable,
+} from '../core/automation.mjs'
 import { VideoFactoryError } from './shared.mjs'
 
 /**
@@ -85,6 +91,43 @@ export function createEnvActions(config, logger) {
         if (missingFilters.length > 0) problems.push(`ffmpeg 缺少必需的滤镜：${missingFilters.join(', ')}`)
       }
       if (ffprobe !== null) report.ffprobe.version = await versionOf(ffprobe)
+
+      /*
+       * Input transports, reported because they decide whether this machine can drive a browser or an
+       * application at all, and because the answer differs from machine to machine.
+       *
+       * `virtualkbd` is a real HID device created by our own driver, and it is the one to prefer: being a
+       * device, nothing above the HID layer can treat its input as synthetic. `driver` is the Interception
+       * filter, which is present here but whose keyboard path silently delivers nothing on this virtual
+       * machine. `sendinput` always works and needs no installation.
+       *
+       * Each is probed rather than assumed — the files being present says nothing about whether the driver
+       * actually started.
+       */
+      const virtualKeyboard = await virtualKeyboardAvailable()
+      const filter = await driverAvailable()
+      report.input = {
+        transports: INPUT_TRANSPORTS,
+        preference: TRANSPORT_PREFERENCE,
+        virtualKeyboard: {
+          available: virtualKeyboard.available,
+          reason: virtualKeyboard.reason,
+          note: '自研 VHF 虚拟 HID 键盘；作为真实设备进入输入栈，应用无法与物理键盘区分。',
+        },
+        filterDriver: {
+          available: filter.available,
+          reason: filter.reason,
+          note: 'Interception 过滤驱动。本机鼠标可用，键盘路径静默无效（虚拟机的模拟 PS/2 键盘）。',
+        },
+        sendInput: { available: true, note: 'Win32 SendInput；无需安装，始终可用。' },
+      }
+      if (!virtualKeyboard.available) {
+        report.notes = [
+          ...(report.notes ?? []),
+          `虚拟 HID 键盘不可用（${virtualKeyboard.reason}）。键盘输入将回退到 SendInput。` +
+            '安装方式：先运行 components/vhfkey/build.ps1，再运行 components/vhfkey/install-run.ps1。',
+        ]
+      }
 
       if (!report.ark.keyPresent) {
         report.notes = [

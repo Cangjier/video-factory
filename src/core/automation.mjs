@@ -40,44 +40,51 @@ export const OCR_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'ocr.ps1')
 export const DRIVER_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'interception-input.ps1')
 
 /**
- * The input transports available for pointer actions.
+ * The virtual HID keyboard client, built from `components/vhfkey`.
  *
- * `sendinput` injects at user level through the Win32 input API. `driver` sends through the
- * Interception filter driver, which sits below that boundary in the input stack.
+ * This is the transport that matters, and the only one that is a real device. It is a small console
+ * program that opens the driver's device interface and submits HID input reports; Windows then delivers
+ * them through the ordinary keyboard stack, exactly as it would a physical keyboard's. Nothing above the
+ * HID layer can tell the difference, which is the point — a filter driver can be bypassed or ignored,
+ * and a user-mode injection API can be filtered out, but a device in the HID stack is the input path.
  *
- * Both were measured working on this machine, including on a browser button. The driver is the more
- * faithful transport — nothing in the stack can tell its events from a device's own — and it is the
- * one to reach for when a target treats synthetic input as a different class of event, which is
- * common in games and in software that reads raw device state.
- *
- * Note the honest history: an earlier conclusion that SendInput could not activate a browser button
- * was wrong, and the real fault was the coordinate arithmetic. The driver is a fallback for targets
- * that need it, not a fix for mis-aimed clicks.
+ * It is also the transport that took the most work to reach: see `components/vhfkey/driver/vhfkey.c` for
+ * the four faults that had to be fixed before the driver would load at all.
  */
-export const INPUT_TRANSPORTS = ['sendinput', 'driver']
+export const VIRTUAL_KEYBOARD_CLIENT = resolve(PLUGIN_ROOT, 'components', 'vhfkey', 'out', 'vhfkeyctl.exe')
 
 /**
- * Which transport to use for each kind of input, in order of preference.
+ * The input transports available.
  *
- * The preference differs by kind because the driver is only partly functional on this machine, and
- * that was established by measurement rather than assumed:
+ * `sendinput`   injects at user level through the Win32 input API.
+ * `driver`      sends through the Interception filter driver, which sits below that boundary. On this
+ *               machine it works for the pointer and for nothing else: its keyboard path accepts
+ *               keystrokes and they never arrive, because the filter did not attach to the emulated PS/2
+ *               keyboard of this virtual machine.
+ * `virtualkbd`  submits HID reports to a virtual keyboard device created by our own driver. Verified by
+ *               typing into Notepad and reading the document back, byte for byte.
+ */
+export const INPUT_TRANSPORTS = ['sendinput', 'driver', 'virtualkbd']
+
+/**
+ * Which transport to use for each kind of input, in order of preference, and why.
  *
- *   mouse     driver first. `move` lands exactly where it is aimed and `click` activates a control,
- *             both verified.
- *   keyboard  SendInput first. The driver reports every keystroke as sent — 32 of 32 accepted, for a
- *             two-stroke experiment as well — and nothing reaches the application. Keyboard devices
- *             2 through 10 return 0 from `interception_send`, and every device reports a placeholder
- *             hardware id ("A") rather than a device path, which is consistent with the filter not
- *             having attached to a real keyboard. This is a QEMU virtual machine, so the keyboard is
- *             emulated and the filter may simply not see it.
+ *   mouse     driver first. `move` lands exactly where it is aimed and `click` activates a control. A
+ *             virtual pointer does not exist yet, so the filter driver remains the better option here;
+ *             SendInput is the fallback, and it also works.
  *
- * So the driver is not "the answer" in the abstract; it works for the pointer here and does not work
- * for keys. Callers get the preference, not a promise, and {@link driverAvailable} plus a rejection
- * from the driver path let a caller fall through.
+ *   keyboard  virtualkbd first. It is a genuine HID device, so it is the transport least likely to be
+ *             ignored or treated as synthetic. SendInput second, because it is dependable and needs no
+ *             installation. The filter driver last, because on this machine it silently does nothing:
+ *             it reports every keystroke as accepted and none arrives.
+ *
+ * The honest history is worth keeping: an earlier conclusion that SendInput could not activate a browser
+ * button was wrong, and the real fault was coordinate arithmetic. The transports are chosen for what they
+ * are, not as a fix for a bug that was never theirs.
  */
 export const TRANSPORT_PREFERENCE = {
   mouse: ['driver', 'sendinput'],
-  keyboard: ['sendinput', 'driver'],
+  keyboard: ['virtualkbd', 'sendinput', 'driver'],
 }
 
 /**
@@ -136,6 +143,93 @@ export async function driverAvailable() {
     return { available: true, detail: report, reason: null }
   } catch (error) {
     return { available: false, detail: null, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Send keyboard input through the virtual HID keyboard.
+ *
+ * The client waits for the driver to accept each report and exits non-zero if any is refused, so a zero
+ * exit is a real acknowledgement rather than a request that was queued somewhere. The console window is
+ * suppressed: a visible one takes the foreground from the target and the keystrokes then go to the wrong
+ * window, which is exactly the trap that made an early verification appear to fail.
+ *
+ * @param {'type'|'key'|'combo'|'probe'} action - what to send.
+ * @param {object} [params] - `{ text, key, modifier }`.
+ * @returns {Promise<object>} `{ ok, action, text|key, exitCode }`.
+ * @throws {AutomationError} when the client is missing or the device refuses the input.
+ */
+export async function virtualKeyboardInput(action, params = {}, options = {}) {
+  if (!existsSync(VIRTUAL_KEYBOARD_CLIENT)) {
+    throw new AutomationError(
+      `虚拟键盘客户端不存在：${VIRTUAL_KEYBOARD_CLIENT}。` +
+        '先运行 components/vhfkey/build.ps1 构建，再运行 install-run.ps1 安装驱动。',
+    )
+  }
+
+  let args
+  switch (action) {
+    case 'probe':
+      args = ['probe']
+      break
+    case 'type':
+      if (typeof params.text !== 'string' || params.text.length === 0) {
+        throw new AutomationError('type 需要非空的 text')
+      }
+      args = ['type', params.text]
+      break
+    case 'key':
+      if (typeof params.key !== 'string' || params.key.length === 0) {
+        throw new AutomationError('key 需要按键名，例如 ENTER 或 A')
+      }
+      args = ['key', params.key]
+      break
+    case 'combo':
+      if (typeof params.modifier !== 'string' || typeof params.key !== 'string') {
+        throw new AutomationError('combo 需要 modifier 与 key，例如 CTRL 与 A')
+      }
+      args = ['combo', params.modifier, params.key]
+      break
+    default:
+      throw new AutomationError(`虚拟键盘不支持的动作：${action}`)
+  }
+
+  let stdout = ''
+  let exitCode = 0
+  try {
+    const result = await run(VIRTUAL_KEYBOARD_CLIENT, args, {
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: options.timeoutMs ?? 60_000,
+      windowsHide: true,
+      encoding: 'buffer',
+    })
+    stdout = result.stdout.toString('utf8').replace(/^\uFEFF/, '').trim()
+  } catch (error) {
+    exitCode = typeof error?.code === 'number' ? error.code : 1
+    stdout = (error?.stdout ?? Buffer.alloc(0)).toString('utf8').trim()
+    // Exit code 2 is the client's own "device not found", which is a different problem from a rejected
+    // report and worth naming so a caller does not look in the wrong place.
+    const hint = exitCode === 2 ? '（驱动未安装或设备未启动）' : ''
+    throw new AutomationError(`虚拟键盘动作 ${action} 失败：${stdout || '(无输出)'}${hint}`)
+  }
+
+  return { ok: true, action, exitCode, detail: stdout || null }
+}
+
+/**
+ * Is the virtual keyboard usable right now?
+ *
+ * The client reports whether it can find and open the device, which is the question that matters: the
+ * driver may be installed and still not have started, and only the device interface tells them apart.
+ *
+ * @returns {Promise<{available: boolean, reason: string|null}>} availability.
+ */
+export async function virtualKeyboardAvailable() {
+  try {
+    await virtualKeyboardInput('probe')
+    return { available: true, reason: null }
+  } catch (error) {
+    return { available: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 
@@ -645,44 +739,130 @@ export async function clickText(needle, options = {}) {
 /**
  * Type text into whatever has focus.
  *
- * Keyboard input goes to SendInput first, not the driver, because the driver keyboard path does not
- * work on this machine: it reports every keystroke as sent and nothing arrives, while SendInput types
- * into the same control successfully. See {@link TRANSPORT_PREFERENCE} for the measurements.
+ * The transports are tried in the order {@link TRANSPORT_PREFERENCE} gives for `keyboard`, and each
+ * failure falls through to the next rather than aborting: a machine without the virtual keyboard
+ * installed still types through SendInput, and a target that ignores user-mode injection can be served by
+ * naming a transport explicitly.
  *
- * `transport: 'driver'` forces the driver anyway, so a machine where it does work — or a target that
- * ignores user-mode input — can be served. On such a target the caller should pass it explicitly.
+ *   virtualkbd  a real HID device, so nothing above the HID layer can treat the input as synthetic
+ *   sendinput   dependable, needs no installation
+ *   driver      the Interception filter; on this machine it accepts keystrokes and delivers none
+ *
+ * The transport that actually ran is returned, so a caller can tell which one it got instead of assuming.
  *
  * @param {string} text - the text to type.
  * @param {object} [options] - `{ transport, delayMs }`.
  * @returns {Promise<object>} the helper's report, with the transport that ran.
  */
 export async function typeText(text, options = {}) {
-  if (options.transport === 'driver') {
-    const result = await driverInput('text', { Keys: text, DelayMs: options.delayMs ?? 18 })
-    return { ...result, transport: 'driver' }
+  const order = options.transport ? [options.transport] : TRANSPORT_PREFERENCE.keyboard
+  const failures = []
+
+  for (const transport of order) {
+    try {
+      if (transport === 'virtualkbd') {
+        const result = await virtualKeyboardInput('type', { text })
+        return { ...result, transport: 'virtualkbd' }
+      }
+      if (transport === 'driver') {
+        const result = await driverInput('text', { Keys: text, DelayMs: options.delayMs ?? 18 })
+        return { ...result, transport: 'driver' }
+      }
+      if (transport === 'sendinput') {
+        const result = await desktop('text', { Text: text })
+        return { ...result, transport: 'sendinput' }
+      }
+      throw new AutomationError(`未知的输入传输：${transport}`)
+    } catch (error) {
+      failures.push(`${transport}: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
-  const result = await desktop('text', { Text: text })
-  return { ...result, transport: 'sendinput' }
+
+  throw new AutomationError(`所有键盘传输都失败：${failures.join(' | ')}`)
 }
 
 /**
- * Send a key chord, using the SendKeys grammar (`^a` for Ctrl+A, `{ENTER}`, `%{F4}`).
+ * Send a key, by name or as a SendKeys chord.
  *
- * SendInput first, for the same measured reason as {@link typeText}: the driver accepts keystrokes
- * that never arrive here. A single key can be forced through the driver with `transport: 'driver'`,
- * where `key` is then a scan-code name (ENTER, TAB, A) or one character rather than a chord.
+ * Transport order is the same as {@link typeText}. The two are not interchangeable: `virtualkbd` and
+ * `driver` take a key name (`ENTER`, `TAB`, `A`) or a combination, while `sendinput` takes the SendKeys
+ * grammar (`^a` for Ctrl+A, `%{F4}` for Alt+F4). A caller that needs a chord and does not care which
+ * transport runs should pass the chord, because it is translated for the device transports:
+ * `sendKey('^a')` becomes a CTRL+A combination on the virtual keyboard.
  *
- * @param {string} chord - the chord.
+ * @param {string} chord - the key or chord.
  * @param {object} [options] - `{ transport, delayMs }`.
  * @returns {Promise<object>} the helper's report, with the transport that ran.
  */
 export async function sendKey(chord, options = {}) {
-  if (options.transport === 'driver') {
-    const result = await driverInput('key', { Keys: chord, DelayMs: options.delayMs ?? 18 })
-    return { ...result, transport: 'driver' }
+  const order = options.transport ? [options.transport] : TRANSPORT_PREFERENCE.keyboard
+  const failures = []
+
+  // The SendKeys grammar is what SendInput understands; the device transports want a key name. The
+  // translation is attempted up front so all three can be tried for the same logical request.
+  const decoded = decodeKeyChord(chord)
+
+  for (const transport of order) {
+    try {
+      if (transport === 'virtualkbd') {
+        const result = decoded
+          ? decoded.modifier
+            ? await virtualKeyboardInput('combo', { modifier: decoded.modifier, key: decoded.key })
+            : await virtualKeyboardInput('key', { key: decoded.key })
+          : await virtualKeyboardInput('key', { key: chord })
+        return { ...result, transport: 'virtualkbd' }
+      }
+      if (transport === 'driver') {
+        const result = await driverInput('key', { Keys: decoded?.key ?? chord, DelayMs: options.delayMs ?? 18 })
+        return { ...result, transport: 'driver' }
+      }
+      if (transport === 'sendinput') {
+        const result = await desktop('key', { Text: chord })
+        return { ...result, transport: 'sendinput' }
+      }
+      throw new AutomationError(`未知的输入传输：${transport}`)
+    } catch (error) {
+      failures.push(`${transport}: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
-  const result = await desktop('key', { Text: chord })
-  return { ...result, transport: 'sendinput' }
+
+  throw new AutomationError(`所有键盘传输都失败：${failures.join(' | ')}`)
+}
+
+/**
+ * Translate the SendKeys grammar into a modifier and a key name.
+ *
+ * Only the forms that actually occur are handled — a leading `^`, `%` or `+` modifier, and `{NAME}` — and
+ * anything unrecognised returns null, which makes the caller fall back to passing the string through
+ * untouched. Guessing at the rest of the grammar would be worse than not understanding it.
+ *
+ * @param {string} chord - for example `^a`, `%{F4}`, `{ENTER}` or `A`.
+ * @returns {{modifier: string|null, key: string}|null} the decoded chord, or null when it is not one.
+ */
+export function decodeKeyChord(chord) {
+  if (typeof chord !== 'string' || chord.length === 0) return null
+
+  const modifiers = { '^': 'CTRL', '%': 'ALT', '+': 'SHIFT' }
+  let rest = chord
+  let modifier = null
+
+  if (modifiers[rest[0]]) {
+    modifier = modifiers[rest[0]]
+    rest = rest.slice(1)
+  }
+
+  const braced = /^\{([^}]+)\}$/.exec(rest)
+  if (braced) {
+    const name = braced[1].toUpperCase()
+    // SendKeys names a few keys differently from the HID usage table.
+    const aliases = { RETURN: 'ENTER', ESCAPE: 'ESC', DEL: 'DELETE', INS: 'INSERT', BACK: 'BACKSPACE' }
+    return { modifier, key: aliases[name] ?? name }
+  }
+
+  // A single character maps to its own key; longer unbraced text is not a chord and is left alone.
+  if (rest.length === 1) return { modifier, key: rest.toUpperCase() }
+  if (modifier === null) return null
+  return { modifier, key: rest.toUpperCase() }
 }
 
 /**
