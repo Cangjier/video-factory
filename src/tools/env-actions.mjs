@@ -11,6 +11,16 @@ import { resolve } from 'node:path'
 import { resolveBinary, capabilitiesOf, versionOf, vendoredBuild } from '../core/index.mjs'
 import { InstallError, installFfmpeg, vendoredState } from '../core/install.mjs'
 import {
+  OCR_SOURCES,
+  installOcr,
+  ocrInstallState,
+  readManifest,
+  removeOcr,
+} from '../core/ocr-install.mjs'
+import { ocrReport } from '../core/ocr.mjs'
+import { audioEventState } from '../core/audio-events.mjs'
+import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
+import {
   MaterialError,
   describe as describeInventory,
   inventoryToJson,
@@ -163,6 +173,16 @@ export function createEnvActions(config, logger) {
         ]
       }
 
+      /*
+       * OCR is reported here because its absence changes what `video_inspect {action:"ocr"}` can
+       * do, and because the answer is not a problem: Windows' own recogniser always exists. It is
+       * a note, with the one command that fixes the accuracy.
+       */
+      report.ocr = ocrReport(config)
+      if (!report.ocr.available) {
+        report.notes = [...(report.notes ?? []), report.ocr.note]
+      }
+
       report.problems = problems
       report.ok = problems.length === 0
       if (!report.ok) logger.warn(`video-factory: 环境自检发现 ${problems.length} 个问题`)
@@ -223,6 +243,96 @@ export function createEnvActions(config, logger) {
       } catch (error) {
         if (error instanceof MaterialError) throw new VideoFactoryError(`video_env scan: ${error.message}`)
         throw error
+      }
+    },
+
+    /**
+     * Install, or remove, an offline OCR engine.
+     *
+     * Downloading is the only way a fresh machine gets an accurate reader, and it is far cheaper
+     * to trigger from here than to explain the manual steps. The package's SHA-256 is checked
+     * before anything is unpacked, so a truncated or substituted download cannot become the thing
+     * that reads the user's screenshots.
+     *
+     * @param {object} args - the request.
+     * @returns {Promise<object>} the installation state.
+     */
+    async install_ocr(args) {
+      if (args.remove === true) {
+        const id = typeof args.source === 'string' && args.source !== '' ? args.source : undefined
+        const result = removeOcr(id)
+        return {
+          removed: result.removed,
+          active: result.active,
+          reason: result.removed.length === 0 ? '本来就没有安装' : '已删除',
+          state: ocrInstallState(),
+        }
+      }
+
+      const id = typeof args.source === 'string' && args.source !== '' ? args.source : undefined
+      if (id !== undefined && OCR_SOURCES[id] === undefined) {
+        throw new VideoFactoryError(
+          `video_env install_ocr: 未知的 source ${JSON.stringify(id)}；可选：${Object.keys(OCR_SOURCES).join(', ')}`,
+        )
+      }
+      try {
+        const result = await installOcr({
+          source: id,
+          force: args.force === true,
+          prune: args.prune === true,
+          archive: typeof args.archive === 'string' && args.archive !== '' ? resolve(args.archive) : undefined,
+          onProgress: (line) => logger.info(`video-factory install_ocr: ${line}`),
+        })
+        return {
+          ...result,
+          manifest: readManifest(),
+          // The state is re-read from disk rather than echoed back, so "installed" always means
+          // the executable is there.
+          state: ocrInstallState(),
+          ocr: ocrReport(config),
+        }
+      } catch (error) {
+        if (error instanceof InstallError) throw new VideoFactoryError(`安装 OCR 引擎失败：${error.message}`)
+        throw error
+      }
+    },
+
+    /**
+     * Provision audio event detection: the YAMNet model plus the WASM inference runtime.
+     *
+     * Separate from `install_ocr` because the two are independent — a machine can happily have
+     * one and not the other — and because the licensing story differs. Both the model files and
+     * the runtime tarballs are checked against recorded hashes before anything is written.
+     *
+     * @param {object} args - the request.
+     * @returns {Promise<object>} the installation state.
+     */
+    async install_audio(args) {
+      if (args.remove === true) {
+        const result = removeAudio({ onProgress: (line) => logger.info(`video-factory install_audio: ${line}`) })
+        return {
+          removed: result.removed,
+          directory: result.directory,
+          reason: result.removed ? '已删除' : '本来就没有安装',
+          state: audioEventState(),
+        }
+      }
+
+      try {
+        const result = await installAudio({
+          force: args.force === true,
+          modelArchive: typeof args.archive === 'string' && args.archive !== '' ? resolve(args.archive) : undefined,
+          onProgress: (line) => logger.info(`video-factory install_audio: ${line}`),
+        })
+        return {
+          ...result,
+          // Re-read from disk: "installed" must mean the files are there, not that a call
+          // returned without throwing.
+          state: audioEventState(),
+          verify: verifyInstalledAudio(),
+        }
+      } catch (error) {
+        throw new VideoFactoryError(`安装音频事件检测失败：${error.message}`)
       }
     },
   }

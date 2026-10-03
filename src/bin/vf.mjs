@@ -16,6 +16,11 @@ import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { capabilitiesOf, resolveBinary, versionOf, vendoredBuild } from '../core/env.mjs'
 import { installFfmpeg, vendoredState } from '../core/install.mjs'
+import { installOcr, ocrInstallState, removeOcr } from '../core/ocr-install.mjs'
+import { findLines, ocrReport, parseRegion, readText } from '../core/ocr.mjs'
+import { sampleFrames } from '../core/sampling.mjs'
+import { audioEventState, detectAudioEvents } from '../core/audio-events.mjs'
+import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
 import { describe as describeInventory, inventoryToJson, scan } from '../core/materials.mjs'
 import { estimatedDuration, fieldReference, loadResolvedPlan } from '../core/plan.mjs'
 import { probe } from '../core/probe.mjs'
@@ -30,6 +35,13 @@ import { makeTestMaterial } from './make-test-material.mjs'
 
 /** Print a JSON result. */
 const emit = (value) => console.log(JSON.stringify(value, null, 2))
+
+/** Drop keys whose value is `undefined`, so a core default is not overwritten by absence. */
+const defined = (object) =>
+  Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined))
+
+/** Parse an optional numeric option. */
+const numberOrUndefined = (value) => (value === undefined ? undefined : Number(value))
 
 /** Resolve the out/work directories for a render command. */
 function renderDirs(plan, options) {
@@ -56,6 +68,8 @@ const COMMANDS = {
       ffmpeg: ffmpeg === null ? { found: false } : { found: true, path: ffmpeg },
       ffprobe: ffprobe === null ? { found: false } : { found: true, path: ffprobe },
       vendored: vendoredBuild(),
+      ocr: ocrReport({}),
+      audio: audioEventState(),
       arkKeyPresent: typeof process.env.ARK_API_KEY === 'string' && process.env.ARK_API_KEY !== '',
       problems,
     }
@@ -83,6 +97,137 @@ const COMMANDS = {
       onProgress: (message) => console.error(message),
     })
     emit({ ...result, state: vendoredState() })
+    return 0
+  },
+
+  /** Install, or remove, an offline OCR engine. */
+  async 'install-ocr'(options) {
+    if (options.remove === true) {
+      const result = removeOcr(options.source)
+      emit({ ...result, state: ocrInstallState() })
+      return 0
+    }
+    const result = await installOcr({
+      source: options.source,
+      force: options.force === true,
+      prune: options.prune === true,
+      archive: options.archive,
+      onProgress: (message) => console.error(message),
+    })
+    emit({ ...result, state: ocrInstallState() })
+    return 0
+  },
+
+  /** Read text off an image or a video, and optionally locate a string in it. */
+  async ocr(options) {
+    const target = options.paths?.[0]
+    if (target === undefined) throw new Error('ocr: <文件> is required')
+    const config = { ocr: { defaultEngine: options.engine ?? 'auto' } }
+    const read = await readText(resolve(target), {
+      config,
+      engine: options.engine,
+      region: parseRegion(options.region),
+      scale: options.scale === undefined ? undefined : options.scale === 'auto' ? 'auto' : Number(options.scale),
+      language: options.language,
+      maxSideLen: options['max-side'] === undefined ? undefined : Number(options['max-side']),
+      frames: options.frames === undefined ? undefined : Number(options.frames),
+      onLog: (message) => console.error(message),
+    })
+    const matches = options.find === undefined ? null : findLines(read.lines, [options.find], { match: options.match })
+    if (options.json === true) emit({ ...read, matches })
+    else {
+      console.log(`引擎 ${read.engine}，${read.lines.length} 行，${read.elapsedMs} ms`)
+      for (const line of read.lines) {
+        console.log(`  ${String(line.score ?? '-').padEnd(6)} [${line.x},${line.y} ${line.width}x${line.height}] ${line.text}`)
+      }
+      if (matches !== null) {
+        console.log(`\n找到 ${matches.length} 处 "${options.find}"：`)
+        for (const match of matches) console.log(`  ${match.center.x},${match.center.y}  ${match.text}`)
+      }
+    }
+    return options.find === undefined || matches.length > 0 ? 0 : 1
+  },
+
+  /** Install, or remove, the audio event detection model and runtime. */
+  async 'install-audio'(options) {
+    if (options.remove === true) {
+      const result = removeAudio({ onProgress: (message) => console.error(message) })
+      emit({ ...result, state: audioEventState() })
+      return 0
+    }
+    const result = await installAudio({
+      force: options.force === true,
+      modelArchive: options.archive,
+      onProgress: (message) => console.error(message),
+    })
+    emit({ ...result, state: audioEventState(), verify: verifyInstalledAudio() })
+    return 0
+  },
+
+  /** Sample the moments of a video worth looking at. */
+  async frames(options) {
+    const target = options.paths?.[0]
+    if (target === undefined) throw new Error('frames: <视频> is required')
+    const report = await sampleFrames(resolve(target), {
+      config: {},
+      // Drop anything not given on the command line: an explicit `undefined` would overwrite
+      // the core defaults rather than deferring to them.
+      ...defined({
+        strategy: options.strategy,
+        probeFps: numberOrUndefined(options['probe-fps']),
+        targetFps: numberOrUndefined(options['target-fps']),
+        sceneThreshold: numberOrUndefined(options['scene-threshold']),
+        motionThreshold: numberOrUndefined(options['motion-threshold']),
+        maxFrames: numberOrUndefined(options['max-frames']),
+      }),
+    })
+    if (options.json === true) emit(report)
+    else {
+      console.log(
+        `${report.duration}s，探测 ${report.probe.width}x${report.probe.height}@${report.probe.fps} ` +
+          `共 ${report.probe.decodedFrames} 帧，选中 ${report.frames.length} 帧（跳过 ${report.skipped}）`,
+      )
+      for (const frame of report.frames) {
+        console.log(
+          `  ${String(frame.at).padStart(8)}s  ${frame.reason.padEnd(23)} ` +
+            `scene=${String(frame.sceneScore).padStart(7)}  gap=${frame.gapFromPrevious}`,
+        )
+      }
+    }
+    return 0
+  },
+
+  /** Classify a soundtrack into timestamped acoustic events. */
+  async audio(options) {
+    const target = options.paths?.[0]
+    if (target === undefined) throw new Error('audio: <文件> is required')
+    const report = await detectAudioEvents(resolve(target), {
+      config: {},
+      ...defined({
+        start: numberOrUndefined(options.start),
+        duration: numberOrUndefined(options.duration),
+        topK: numberOrUndefined(options['top-k']),
+        minScore: numberOrUndefined(options['min-score']),
+      }),
+    })
+    if (options.json === true) emit(report)
+    else {
+      console.log(
+        `${report.durationSec.toFixed(2)}s，${report.soundtrack.windows} 个分析窗` +
+          `（分类 ${report.soundtrack.classified}，静音 ${report.soundtrack.silent}）`,
+      )
+      console.log('\n事件（标签 → 时间点）：')
+      for (const [label, times] of Object.entries(report.events)) {
+        console.log(`  ${label.padEnd(24)} ${times.length} 次  ${times.slice(0, 8).join(', ')}${times.length > 8 ? ' …' : ''}`)
+      }
+      console.log('\n逐窗：')
+      for (const segment of report.segments) {
+        const labels = segment.silent
+          ? '(静音)'
+          : segment.labels.map((l) => `${l.label} ${l.score}`).join(' | ')
+        console.log(`  ${String(segment.at).padStart(8)}s  rms=${String(segment.rms).padEnd(8)} ${labels}`)
+      }
+    }
     return 0
   },
 
@@ -244,8 +389,18 @@ async function main() {
 用法：node src/bin/vf.mjs <命令> [选项]
 
 命令：
-  doctor                             检查 ffmpeg / ffprobe 与云端 Key
+  doctor                             检查 ffmpeg / ffprobe、OCR 引擎与云端 Key
   install [--force]                  把 ffmpeg 装进 vendor/
+  install-ocr [--source <id>] [--archive <本地.7z>] [--prune] [--force] [--remove]
+                                     把离线 OCR 引擎装进 vendor/ocr/
+  ocr <文件> [--region x,y,w,h] [--scale auto|<倍数>] [--engine auto|local|winrt]
+             [--find "<文字>"] [--json]   读图片/视频里的文字，可定位并给出点击坐标
+  install-audio [--force] [--remove]   把 YAMNet 模型与 WASM 运行时装进 vendor/audio/
+  frames <视频> [--strategy adaptive|uniform|scene_change|motion_aware]
+             [--probe-fps 4] [--scene-threshold 30] [--motion-threshold 5] [--json]
+                                       自适应抽帧：找剪切点与运动，报出每帧的选中理由与分值
+  audio <文件> [--start 秒] [--duration 秒] [--top-k 3] [--min-score 0.1] [--json]
+                                       识别音轨里的声学事件（音乐/环境音/音效）与时间点
   scan <目录> [--json] [--no-dedupe] 盘点素材
   fields                             打印 plan.json 字段速查
   check --plan <plan.json>           校验计划并报时长
@@ -286,6 +441,28 @@ async function main() {
       name: { type: 'string' },
       model: { type: 'string' },
       base: { type: 'string' },
+      source: { type: 'string' },
+      archive: { type: 'string' },
+      region: { type: 'string' },
+      scale: { type: 'string' },
+      engine: { type: 'string' },
+      language: { type: 'string' },
+      find: { type: 'string' },
+      match: { type: 'string' },
+      frames: { type: 'string' },
+      'max-side': { type: 'string' },
+      strategy: { type: 'string' },
+      'probe-fps': { type: 'string' },
+      'target-fps': { type: 'string' },
+      'scene-threshold': { type: 'string' },
+      'motion-threshold': { type: 'string' },
+      'max-frames': { type: 'string' },
+      start: { type: 'string' },
+      duration: { type: 'string' },
+      'top-k': { type: 'string' },
+      'min-score': { type: 'string' },
+      prune: { type: 'boolean' },
+      remove: { type: 'boolean' },
       json: { type: 'boolean' },
       force: { type: 'boolean' },
       watermark: { type: 'boolean' },
