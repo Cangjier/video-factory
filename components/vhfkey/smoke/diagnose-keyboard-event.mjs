@@ -19,7 +19,7 @@ import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 
 const run = promisify(execFile)
-const root = resolve(import.meta.dirname, '..', '..')
+const root = resolve(import.meta.dirname, '..', '..', '..')
 const client = resolve(root, 'components', 'vhfkey', 'out', 'vhfctl.exe')
 const probe = resolve(root, 'tmp', 'smoke', 'keyboard-event-probe.ps1')
 const logPath = resolve(root, 'tmp', 'smoke', 'kbd-event-log.txt')

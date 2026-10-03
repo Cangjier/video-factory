@@ -11,10 +11,10 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { resolve } from 'node:path'
-import { desktop, windows } from '../../src/core/automation.mjs'
+import { desktop, windows } from '../../../src/core/automation.mjs'
 
 const run = promisify(execFile)
-const root = resolve(import.meta.dirname, '..', '..')
+const root = resolve(import.meta.dirname, '..', '..', '..')
 const client = resolve(root, 'components', 'vhfkey', 'out', 'vhfctl.exe')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 

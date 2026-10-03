@@ -11,7 +11,7 @@ import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 
 const run = promisify(execFile)
-const root = resolve(import.meta.dirname, '..', '..')
+const root = resolve(import.meta.dirname, '..', '..', '..')
 const client = resolve(root, 'components', 'vhfkey', 'out', 'vhfctl.exe')
 
 const probeScript = resolve(root, 'tmp', 'smoke', 'mouse-event-probe.ps1')

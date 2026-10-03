@@ -1,10 +1,10 @@
 ﻿# post-reboot-verify.ps1 — reinstall and verify both virtual devices after a reboot, then report by email.
 #
-# The machine accumulated device state over a long session of driver installs, and the virtual keyboard
-# stopped producing input while the virtual mouse, from the same code and the same framework, kept working.
-# Everything the code controls was checked and found correct, and the version of the driver that had been
-# verified working earlier failed in exactly the same way — so the remaining variable is the machine's own
-# state, which a reboot clears.
+# The failures this script was first written to explain were not the machine's state. The driver was not
+# calling VhfReadReportSubmit, so every report died in a local buffer while the IOCTL, the enumeration and the
+# kbdhid/mouhid bindings all reported success - and no reboot could ever have fixed that. When this reports
+# "no input", suspect the code and the staged binary (build.ps1 step 3c, install-run.ps1 step 2) first. A
+# reboot is still worth doing between install cycles, to clear leftover device nodes.
 #
 # This runs once at logon so the answer arrives without anyone having to watch for it. It is written to be
 # legible in the email on its own, because the result is the only thing that will be visible afterwards.

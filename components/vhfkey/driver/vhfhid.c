@@ -203,6 +203,13 @@ VhfHidTrySubmit(_In_ PVHFDEVICE Device)
     packet.reportBufferLen = length;
     packet.reportId = 0;
 
+    /*
+     * The submission itself. Without it the report dies in a local buffer, and nothing above reports a
+     * failure: the IOCTL returns STATUS_SUCCESS, the device enumerates, and kbdhid and mouhid bind. The only
+     * symptom is that no input is ever produced. The lock is released before this call because it can
+     * re-enter the driver.
+     */
+    (VOID)VhfReadReportSubmit(handle, &packet);
 }
 
 static VOID
