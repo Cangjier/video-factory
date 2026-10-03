@@ -45,16 +45,40 @@ export const DRIVER_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'interception-in
  * `sendinput` injects at user level through the Win32 input API. `driver` sends through the
  * Interception filter driver, which sits below that boundary in the input stack.
  *
- * Both were measured working on this machine, including on a browser button. The driver is the
- * more faithful transport — nothing in the stack can tell its events from a device's own — and it
- * is the one to reach for when a target treats synthetic input as a different class of event,
- * which is common in games and in software that reads raw device state.
+ * Both were measured working on this machine, including on a browser button. The driver is the more
+ * faithful transport — nothing in the stack can tell its events from a device's own — and it is the
+ * one to reach for when a target treats synthetic input as a different class of event, which is
+ * common in games and in software that reads raw device state.
  *
- * Note the honest history: an earlier conclusion that SendInput could not activate a browser
- * button was wrong, and the real fault was the coordinate arithmetic above. The driver is a
- * fallback for targets that need it, not a fix for mis-aimed clicks.
+ * Note the honest history: an earlier conclusion that SendInput could not activate a browser button
+ * was wrong, and the real fault was the coordinate arithmetic. The driver is a fallback for targets
+ * that need it, not a fix for mis-aimed clicks.
  */
 export const INPUT_TRANSPORTS = ['sendinput', 'driver']
+
+/**
+ * Which transport to use for each kind of input, in order of preference.
+ *
+ * The preference differs by kind because the driver is only partly functional on this machine, and
+ * that was established by measurement rather than assumed:
+ *
+ *   mouse     driver first. `move` lands exactly where it is aimed and `click` activates a control,
+ *             both verified.
+ *   keyboard  SendInput first. The driver reports every keystroke as sent — 32 of 32 accepted, for a
+ *             two-stroke experiment as well — and nothing reaches the application. Keyboard devices
+ *             2 through 10 return 0 from `interception_send`, and every device reports a placeholder
+ *             hardware id ("A") rather than a device path, which is consistent with the filter not
+ *             having attached to a real keyboard. This is a QEMU virtual machine, so the keyboard is
+ *             emulated and the filter may simply not see it.
+ *
+ * So the driver is not "the answer" in the abstract; it works for the pointer here and does not work
+ * for keys. Callers get the preference, not a promise, and {@link driverAvailable} plus a rejection
+ * from the driver path let a caller fall through.
+ */
+export const TRANSPORT_PREFERENCE = {
+  mouse: ['driver', 'sendinput'],
+  keyboard: ['sendinput', 'driver'],
+}
 
 /**
  * Run one action through the Interception driver.
@@ -483,19 +507,45 @@ export async function click(spec) {
   }
 
   const count = spec.double === true ? 2 : spec.count ?? 1
-  // Move first, then click. A real pointer always travels to a target before it presses, and some
-  // controls hit-test against the last known position or a hover state, so a press that arrives
-  // without a preceding move can land on nothing.
+  const button = spec.button ?? 'left'
+
+  // Mouse input prefers the driver. Move first and then click, because a real pointer always travels
+  // to a target before it presses, and some controls hit-test against the last known position or a
+  // hover state, so a press arriving without a preceding move can land on nothing.
+  //
+  // The driver path is attempted first and falls back to SendInput on any failure, so a machine
+  // without the driver — or one where it rejects the request — still works rather than failing the
+  // whole action. The fallback is reported so a caller can tell which transport actually ran.
+  if (spec.transport !== 'sendinput') {
+    try {
+      await driverInput('move', { X: Math.round(x), Y: Math.round(y) })
+      await driverInput('click', { X: Math.round(x), Y: Math.round(y), Button: button, Count: count })
+      const at = await desktop('cursor')
+      return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'driver' }
+    } catch (error) {
+      if (spec.transport === 'driver') throw error
+      // Fall through to SendInput, keeping the reason so it is not lost.
+      spec.fallbackReason = error instanceof Error ? error.message : String(error)
+    }
+  }
+
   await desktop('move', { X: Math.round(x), Y: Math.round(y), Duration: spec.travel ?? 0.05 })
   await desktop('click', {
     X: Math.round(x),
     Y: Math.round(y),
-    Button: spec.button ?? 'left',
+    Button: button,
     Count: count,
   })
 
   const at = await desktop('cursor')
-  return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front }
+  return {
+    x: at.x,
+    y: at.y,
+    owner: owner.handle === undefined ? null : owner,
+    front,
+    transport: 'sendinput',
+    driverError: spec.fallbackReason ?? null,
+  }
 }
 
 /**
@@ -594,20 +644,45 @@ export async function clickText(needle, options = {}) {
 
 /**
  * Type text into whatever has focus.
+ *
+ * Keyboard input goes to SendInput first, not the driver, because the driver keyboard path does not
+ * work on this machine: it reports every keystroke as sent and nothing arrives, while SendInput types
+ * into the same control successfully. See {@link TRANSPORT_PREFERENCE} for the measurements.
+ *
+ * `transport: 'driver'` forces the driver anyway, so a machine where it does work — or a target that
+ * ignores user-mode input — can be served. On such a target the caller should pass it explicitly.
+ *
  * @param {string} text - the text to type.
- * @returns {Promise<object>} the helper's report.
+ * @param {object} [options] - `{ transport, delayMs }`.
+ * @returns {Promise<object>} the helper's report, with the transport that ran.
  */
-export async function typeText(text) {
-  return desktop('text', { Text: text })
+export async function typeText(text, options = {}) {
+  if (options.transport === 'driver') {
+    const result = await driverInput('text', { Keys: text, DelayMs: options.delayMs ?? 18 })
+    return { ...result, transport: 'driver' }
+  }
+  const result = await desktop('text', { Text: text })
+  return { ...result, transport: 'sendinput' }
 }
 
 /**
  * Send a key chord, using the SendKeys grammar (`^a` for Ctrl+A, `{ENTER}`, `%{F4}`).
+ *
+ * SendInput first, for the same measured reason as {@link typeText}: the driver accepts keystrokes
+ * that never arrive here. A single key can be forced through the driver with `transport: 'driver'`,
+ * where `key` is then a scan-code name (ENTER, TAB, A) or one character rather than a chord.
+ *
  * @param {string} chord - the chord.
- * @returns {Promise<object>} the helper's report.
+ * @param {object} [options] - `{ transport, delayMs }`.
+ * @returns {Promise<object>} the helper's report, with the transport that ran.
  */
-export async function sendKey(chord) {
-  return desktop('key', { Text: chord })
+export async function sendKey(chord, options = {}) {
+  if (options.transport === 'driver') {
+    const result = await driverInput('key', { Keys: chord, DelayMs: options.delayMs ?? 18 })
+    return { ...result, transport: 'driver' }
+  }
+  const result = await desktop('key', { Text: chord })
+  return { ...result, transport: 'sendinput' }
 }
 
 /**
