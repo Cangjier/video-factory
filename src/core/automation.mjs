@@ -718,8 +718,35 @@ export async function click(spec) {
 
   for (const transport of order) {
     try {
+      /*
+       * Move, confirm the pointer arrived, and only then click.
+       *
+       * The order matters and the confirmation is not optional. A transport can accept a request without
+       * producing any input — that is what a virtual HID device does when something above the HID layer is
+       * taking the input instead — and nothing about the call says so. Moving and clicking as one step then
+       * puts the click wherever the pointer happened to be, which can activate anything at all.
+       *
+       * Confirming first makes a transport that cannot position itself fall through to the next one, and it
+       * makes a click impossible to place on a target that was never reached.
+       */
       if (transport === 'virtualmouse') {
         await virtualMouseInput('move', { x, y })
+      } else if (transport === 'driver') {
+        await driverInput('move', { X: Math.round(x), Y: Math.round(y) })
+      } else if (transport === 'sendinput') {
+        await desktop('move', { X: Math.round(x), Y: Math.round(y), Duration: spec.travel ?? 0.05 })
+      } else {
+        throw new AutomationError(`未知的输入传输：${transport}`)
+      }
+
+      const at = await desktop('cursor')
+      // Three pixels of slack: absolute positioning quantises the desktop onto 0..32767 and rounds.
+      if (Math.abs(at.x - Math.round(x)) > 3 || Math.abs(at.y - Math.round(y)) > 3) {
+        throw new AutomationError(`指针未到达目标（停在 ${at.x},${at.y}）`)
+      }
+
+      // The pointer is on the target, so the click can only land there.
+      if (transport === 'virtualmouse') {
         // A double click is requested as such, so the device sends a real double-click sequence rather than
         // two clicks that the target may or may not pair up.
         await virtualMouseInput(count > 1 && spec.double === true ? 'dblclick' : 'click', {
@@ -728,22 +755,19 @@ export async function click(spec) {
           button,
           count,
         })
-        const at = await desktop('cursor')
-        return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'virtualmouse' }
-      }
-      if (transport === 'driver') {
-        await driverInput('move', { X: Math.round(x), Y: Math.round(y) })
+      } else if (transport === 'driver') {
         await driverInput('click', { X: Math.round(x), Y: Math.round(y), Button: button, Count: count })
-        const at = await desktop('cursor')
-        return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'driver' }
-      }
-      if (transport === 'sendinput') {
-        await desktop('move', { X: Math.round(x), Y: Math.round(y), Duration: spec.travel ?? 0.05 })
+      } else {
         await desktop('click', { X: Math.round(x), Y: Math.round(y), Button: button, Count: count })
-        const at = await desktop('cursor')
-        return { x: at.x, y: at.y, owner: owner.handle === undefined ? null : owner, front, transport: 'sendinput' }
       }
-      throw new AutomationError(`未知的输入传输：${transport}`)
+
+      return {
+        x: at.x,
+        y: at.y,
+        owner: owner.handle === undefined ? null : owner,
+        front,
+        transport,
+      }
     } catch (error) {
       failures.push(`${transport}: ${error instanceof Error ? error.message : String(error)}`)
     }
