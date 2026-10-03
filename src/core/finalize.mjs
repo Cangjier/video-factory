@@ -123,6 +123,13 @@ export async function finalize(timeline, plan, options) {
   }
 
   let audioSource
+  // A plan with no voiceover and no music still leaves the timeline carrying a silent track, and
+  // that silence reaches `loudnorm` as pure digital zero. `loudnorm` responds by emitting NaN,
+  // which the AAC encoder rejects outright ("Input contains (near) NaN/+-Inf") — so a plan whose
+  // audio block is empty used to fail at the last step with a message that names the encoder and
+  // never mentions loudness. Loudness normalisation of silence is also meaningless: there is no
+  // signal to measure. Silence therefore skips it and only pins the format the encoder wants.
+  let silentSource = false
   if (effectiveLabels.length > 1) {
     const mixed = effectiveLabels.map((label) => `[${label}]`).join('')
     // `normalize=0` is required: the amix default halves every input's level.
@@ -131,13 +138,21 @@ export async function finalize(timeline, plan, options) {
   } else if (effectiveLabels.length === 1 && effectiveLabels[0] === '0:a') {
     filters.push('[0:a]anull[amixed]')
     audioSource = 'amixed'
+    silentSource = true
   } else if (effectiveLabels.length === 1) {
     audioSource = effectiveLabels[0]
   } else {
     throw new BuildError('finalize：没有任何音轨可混（keep_scene_audio 关掉了场景声，但也没有配音）')
   }
 
-  filters.push(`[${audioSource}]loudnorm=I=${plan.audio.loudnessTarget.toFixed(1)}:TP=-1.5:LRA=11[aout]`)
+  // The scene tracks are generated as silence by the renderer, so a plan that adds neither a
+  // voiceover nor music is silent by construction rather than by content.
+  const hasOwnAudio = voiceLabel !== null || musicIndex !== null
+  if (silentSource && !hasOwnAudio) {
+    filters.push(`[${audioSource}]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`)
+  } else {
+    filters.push(`[${audioSource}]loudnorm=I=${plan.audio.loudnessTarget.toFixed(1)}:TP=-1.5:LRA=11[aout]`)
+  }
 
   // Subtitles are the only thing that touches the picture. When they are burned in, the
   // video joins the filter graph and is re-encoded; when they are not, the graph holds
