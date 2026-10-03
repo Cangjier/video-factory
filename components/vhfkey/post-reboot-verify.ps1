@@ -73,18 +73,18 @@ Say "  remaining: $($left.Count)"
 Say ''
 Save
 
-# A note before the install, so a silent run is distinguishable from a stuck one. The driver install can
-# raise the Windows security confirmation dialog, which needs a click and would otherwise leave this script
-# waiting with nothing to show for it.
+# A note before the install, so a silent run can be told apart from a stuck one. The driver install can raise
+# the Windows security confirmation dialog, which needs a click; without this, that would leave the script
+# waiting and nothing to show that it had started at all.
 $nodesBefore = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -like '*Virtual HID*' }).Count
 Send-Report 'DSH 任务进行中｜重启后复验已开始' @"
 机器已重启，自动复验开始。
 
-接下来会：清除旧驱动包与设备节点、重新安装、复验键盘与鼠标，然后发结果。
+接下来会依次：清除旧驱动包与设备节点、重新安装、复验键盘与鼠标，然后发结果。
 
-如果这之后你收到结果邮件，说明一切顺利。
-如果你只收到这一封，说明安装过程停住了——多半是弹出「Windows 安全中心」驱动安装确认框在等待点击。
-那种情况下需要在桌面上点「始终安装此驱动程序软件」。
+收到结果邮件说明一切顺利。
+只收到这一封说明安装停住了，多半是「Windows 安全中心」驱动安装确认框在等待点击——
+那种情况下需要在桌面点「始终安装此驱动程序软件」。
 
 重启前残留的设备节点: $nodesBefore
 
