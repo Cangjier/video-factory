@@ -14,8 +14,24 @@ import { BuildError } from './scene.mjs'
 import { estimatedDuration } from './plan.mjs'
 import { probe } from './probe.mjs'
 
-/** Smallest plausible finished file; anything less means the render failed. */
-export const MIN_PLAUSIBLE_BYTES = 10_000
+/**
+ * Floor on how many bits a rendered pixel-second can plausibly occupy.
+ *
+ * A flat absolute byte threshold cannot work here. The value this replaces was 10 000 bytes,
+ * tuned against a 1080x1920 gradient demo that lands near 2 MB; a legitimate 640x360 clip of two
+ * seconds over a flat background encodes to 7.7 KB and was reported as a failed render. A static,
+ * low-complexity picture is exactly what a matted scene produces, so that false positive fired on
+ * this feature's own output.
+ *
+ * Bytes scale with pixels, seconds, and content complexity, so the floor is expressed the same
+ * way: a very low bitrate per megapixel-second. 0.01 bits per pixel-second is orders of magnitude
+ * below what real footage costs, so the check catches an empty or nearly-empty stream without
+ * pretending to judge compression.
+ */
+export const MIN_BITS_PER_PIXEL_SECOND = 0.01
+
+/** Absolute floor, for a stream that is valid but trivially short. */
+export const MIN_PLAUSIBLE_BYTES = 1_000
 
 /**
  * Compare a finished file with the plan it came from.
@@ -43,8 +59,18 @@ export function verifyAgainstPlan(info, plan) {
   }
   if (!info.hasAudio) problems.push('成片没有音轨')
   if (info.pixFmt !== 'yuv420p') problems.push(`像素格式是 ${info.pixFmt}，多数平台要求 yuv420p`)
-  if (info.sizeBytes < MIN_PLAUSIBLE_BYTES) {
-    problems.push(`文件过小（${info.sizeBytes} 字节），可能渲染失败`)
+  // Scale the floor with the picture: a flat 10 KB threshold fails a legitimate short clip of
+  // simple content, which is precisely what a matted or solid-colour scene produces.
+  const pixels = Math.max(1, info.width * info.height)
+  const seconds = Math.max(0.1, info.duration)
+  const floorBytes = Math.max(
+    MIN_PLAUSIBLE_BYTES,
+    Math.round((pixels * seconds * MIN_BITS_PER_PIXEL_SECOND) / 8),
+  )
+  if (info.sizeBytes < floorBytes) {
+    problems.push(
+      `文件过小（${info.sizeBytes} 字节，${info.width}x${info.height} ${info.duration.toFixed(2)}s 的合理下限是 ${floorBytes} 字节），可能渲染失败`,
+    )
   }
   return problems
 }
