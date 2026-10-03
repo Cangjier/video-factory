@@ -28,6 +28,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { OcrError, normaliseText, recogniseImage, recogniseViaWinRT } from './ocr.mjs'
 
 const run = promisify(execFile)
 
@@ -633,41 +634,50 @@ function decodePowerShell(stdout) {
 /**
  * Read text off an image, with positions.
  *
+ * Two engines stand behind this: the installed offline engine when there is one, and Windows'
+ * own recogniser otherwise. The choice matters because the Windows recogniser, on a real
+ * screenshot of this project's window, read `TypeScript` as `TvpeScript` and `执行` as `执 彳 亍`
+ * — accurate enough to find a button labelled in large type, not accurate enough to trust.
+ *
  * The positions are what make this useful for automation rather than just reporting: a label can
  * be found and clicked without the caller knowing any coordinates in advance.
  *
  * @param {string} imagePath - the PNG to read.
- * @param {object} [options] - `{ region: {x,y,width,height}, scale, language }`.
- * @returns {Promise<{language: string, lineCount: number, elapsedMs: number, lines: {text: string, x: number, y: number, width: number, height: number}[]}>} recognised lines.
+ * @param {object} [options] - `{ region, scale, language, engine, timeoutMs }`. `engine` is
+ *   `auto` (the offline engine, falling back to Windows), `local`, or `winrt`.
+ * @returns {Promise<{language: string|null, engine: string, lineCount: number, elapsedMs: number, lines: {text: string, x: number, y: number, width: number, height: number}[]}>} recognised lines.
  * @throws {AutomationError} when OCR cannot run.
  */
 export async function ocr(imagePath, options = {}) {
   if (!existsSync(imagePath)) throw new AutomationError(`OCR 的输入图片不存在：${imagePath}`)
-  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', OCR_SCRIPT, '-Path', imagePath]
-  if (options.scale !== undefined) args.push('-Scale', String(options.scale))
-  if (options.language !== undefined) args.push('-Language', options.language)
-  if (options.region !== undefined) {
-    const { x, y, width, height } = options.region
-    args.push('-Region', `${x},${y},${width},${height}`)
+
+  const engine = options.engine ?? 'auto'
+  const settings = {
+    region: options.region,
+    scale: options.scale ?? 'auto',
+    language: options.language,
+    timeoutMs: options.timeoutMs,
+    config: options.config ?? {},
   }
+  /** One shape for both engines: callers only ever read these five fields. */
+  const shape = (result) => ({
+    language: result.language ?? null,
+    engine: result.engine,
+    lineCount: result.lines.length,
+    elapsedMs: result.elapsedMs,
+    lines: result.lines,
+  })
 
   try {
-    const { stdout } = await run('powershell.exe', args, {
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: options.timeoutMs ?? 60_000,
-      windowsHide: true,
-      encoding: 'buffer',
-    })
-    // Decode as UTF-8 explicitly rather than relying on the process default. The helper sets
-    // [Console]::OutputEncoding to UTF-8, but a mismatch here is invisible: recognised Chinese
-    // arrives as replacement characters and every text lookup simply finds nothing.
-    const text = stdout.toString('utf8').replace(/^\uFEFF/, '').trim()
-    if (text === '') throw new AutomationError('OCR 没有输出')
-    return JSON.parse(text)
+    if (engine === 'winrt') return shape(await recogniseViaWinRT(imagePath, settings))
+    return shape(await recogniseImage(imagePath, settings))
   } catch (error) {
-    if (error instanceof AutomationError) throw error
-    const detail = String(error?.stderr ?? error?.message ?? error).trim()
-    throw new AutomationError(`OCR 失败：${detail.slice(0, 400)}`)
+    if (engine === 'local' || !(error instanceof OcrError)) {
+      throw error instanceof AutomationError
+        ? error
+        : new AutomationError(`OCR 失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+    return shape(await recogniseViaWinRT(imagePath, settings))
   }
 }
 
@@ -907,7 +917,7 @@ export async function click(spec) {
  *
  * @param {string} needle - the text to look for. Matching is case-insensitive and ignores the
  *   spaces some OCR engines insert between CJK glyphs.
- * @param {object} [options] - `{ handle, screenshotPath, scale, exact }`.
+ * @param {object} [options] - `{ handle, screenshotPath, scale, exact, engine, region }`.
  * @returns {Promise<{found: boolean, matches: object[], shot: string, lineCount: number, elapsedMs: number}>} the matches, in screen coordinates.
  */
 export async function findText(needle, options = {}) {
@@ -915,16 +925,20 @@ export async function findText(needle, options = {}) {
   let originX = 0
   let originY = 0
 
+  // `auto` enlargement, not a fixed 2x: a small dialog capture is genuinely helped by being
+  // enlarged, while doubling a full screen costs seconds and reads no better.
+  const read = { scale: options.scale ?? 'auto', engine: options.engine, region: options.region, config: options.config }
+
   let result
   if (options.handle !== undefined) {
     // Capture by window handle, then translate the OCR result into screen space.
     const shot = await screenshot(target, { handle: options.handle })
     originX = shot.x
     originY = shot.y
-    result = await ocr(target, { scale: options.scale ?? 2 })
+    result = await ocr(target, read)
   } else {
     await screenshot(target)
-    result = await ocr(target, { scale: options.scale ?? 2 })
+    result = await ocr(target, read)
   }
 
   const wanted = normalise(needle)
@@ -1124,9 +1138,10 @@ export function decodeKeyChord(chord) {
 /**
  * Normalise text for matching: lower case, and with the spacing OCR inserts between CJK glyphs
  * removed so `音 频` matches `音频`.
+ *
+ * The implementation lives in `ocr.mjs` beside the engines whose output it normalises; this
+ * alias keeps the module's own call sites — and anything importing it from here — unchanged.
  * @param {string} value - the text.
  * @returns {string} the comparable form.
  */
-function normalise(value) {
-  return String(value).toLowerCase().replace(/\s+/g, '')
-}
+const normalise = normaliseText

@@ -13,6 +13,7 @@
  * @module video-factory
  */
 import { registerTools } from './src/tools/index.mjs'
+import { DEFAULT_MAX_SIDE_LEN, DEFAULT_TIMEOUT_MS, IDLE_SHUTDOWN_MS, disposeOcrSessions } from './src/core/ocr.mjs'
 
 /** Stable Cordis plugin name. */
 export const name = 'video-factory'
@@ -25,6 +26,12 @@ export const DEFAULT_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 
 /** Default Edge TTS voice. */
 export const DEFAULT_TTS_VOICE = 'zh-CN-XiaoxiaoNeural'
+
+/** Default OCR recognition language: Simplified Chinese, which still reads Latin text correctly. */
+export const DEFAULT_OCR_LANGUAGE = 'ch'
+
+/** Default OCR engine preference: the installed engine, falling back to the Windows recogniser. */
+export const DEFAULT_OCR_ENGINE = 'auto'
 
 /**
  * Read a required string field, allowing null to mean "use the default".
@@ -72,6 +79,7 @@ export function normalizeConfig(raw) {
   const config = raw ?? {}
   const ark = config.ark ?? {}
   const tts = config.tts ?? {}
+  const ocr = config.ocr ?? {}
 
   return {
     projectRoot: optionalString(config, 'projectRoot', null, 'config.projectRoot'),
@@ -91,6 +99,19 @@ export function normalizeConfig(raw) {
       rate: optionalString(tts, 'rate', '+0%', 'config.tts.rate'),
       pitch: optionalString(tts, 'pitch', '+0Hz', 'config.tts.pitch'),
       volume: optionalString(tts, 'volume', '+0%', 'config.tts.volume'),
+    },
+    ocr: {
+      // Everything here is optional: with no engine installed, OCR falls back to the Windows
+      // recogniser and the rest of the plugin is unaffected.
+      enginePath: optionalString(ocr, 'enginePath', null, 'config.ocr.enginePath'),
+      kind: optionalString(ocr, 'kind', null, 'config.ocr.kind'),
+      source: optionalString(ocr, 'source', null, 'config.ocr.source'),
+      language: optionalString(ocr, 'language', DEFAULT_OCR_LANGUAGE, 'config.ocr.language'),
+      defaultEngine: optionalString(ocr, 'defaultEngine', DEFAULT_OCR_ENGINE, 'config.ocr.defaultEngine'),
+      maxSideLen: optionalPositiveNumber(ocr, 'maxSideLen', DEFAULT_MAX_SIDE_LEN, 'config.ocr.maxSideLen'),
+      timeoutMs: optionalPositiveNumber(ocr, 'timeoutMs', DEFAULT_TIMEOUT_MS, 'config.ocr.timeoutMs'),
+      idleMs: optionalPositiveNumber(ocr, 'idleMs', IDLE_SHUTDOWN_MS, 'config.ocr.idleMs'),
+      scale: optionalString(ocr, 'scale', null, 'config.ocr.scale'),
     },
   }
 }
@@ -130,4 +151,12 @@ export function apply(ctx, rawConfig) {
       ctx.logger.error('video-factory: 没有注册任何工具，插件实际上不可用')
     }
   })
+
+  // A warm OCR engine is a real process holding hundreds of megabytes; it must not outlive the
+  // plugin that started it. `on` is optional because a minimal composition need not expose it.
+  if (typeof ctx.on === 'function') {
+    ctx.on('dispose', () => {
+      disposeOcrSessions()
+    })
+  }
 }

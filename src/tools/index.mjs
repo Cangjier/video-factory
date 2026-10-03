@@ -19,9 +19,19 @@ import { createInspectTool } from './inspect.mjs'
 import { createInspectActions } from './inspect-actions.mjs'
 import { createGenTool } from './gen.mjs'
 import { createGenActions } from './gen-actions.mjs'
+import { createAnalyzeTool } from './analyze.mjs'
+import { createAnalyzeActions } from './analyze-actions.mjs'
 
 /** Every tool name this plugin registers. */
-export const TOOL_NAMES = ['video_env', 'video_narrate', 'video_plan', 'video_render', 'video_inspect', 'video_gen']
+export const TOOL_NAMES = [
+  'video_env',
+  'video_narrate',
+  'video_plan',
+  'video_render',
+  'video_inspect',
+  'video_gen',
+  'video_analyze',
+]
 
 /**
  * Build every tool definition.
@@ -49,6 +59,7 @@ export function toolDefinitions(config, logger, host = {}) {
     createRenderTool(createRenderActions(config, logger)),
     createInspectTool(createInspectActions(config, logger)),
     createGenTool(createGenActions(config, logger)),
+    createAnalyzeTool(createAnalyzeActions(config, logger)),
   ]
 }
 

@@ -13,6 +13,11 @@ vendor/ffmpeg-*.zip
 vendor/*.zip
 vendor/*.7z
 
+# Vendored OCR engine: fetched by `video_env {action:"install_ocr"}`. 44 MB pruned, 95 MB whole,
+# and reproducible from a pinned release URL plus its sha256, so it is not tracked either.
+# vendor/ocr/SOURCE.json records what was installed and from where.
+vendor/ocr/
+
 # Generated stills: reproducible from their prompts, and the point of them is to be
 # produced again, not stored.
 generated/
