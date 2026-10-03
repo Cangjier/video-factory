@@ -19,6 +19,9 @@ $component = Join-Path $root 'components\vhfkey'
 $tools = Join-Path $root 'vendor\wdk\tools'
 $output = Join-Path $component 'out'
 $build = Join-Path $component 'build'
+# The directory the INF installs from, which is not where the build writes. Step 3c keeps the two
+# identical, because a stale binary here has already been installed and crashed the machine twice.
+$driver = Join-Path $component 'driver'
 New-Item -ItemType Directory -Force -Path $output, $build | Out-Null
 
 function Step($text) { Write-Output ''; Write-Output "=== $text ===" }
@@ -316,6 +319,24 @@ if ($problems.Count -gt 0) {
   exit 6
 }
 Write-Output '  ✅ the image is a native x64 DLL, which is what the kernel loader requires'
+
+# ---------------------------------------------------------------------------------------------
+Step '3c. place the verified binary where the INF will find it'
+# ---------------------------------------------------------------------------------------------
+# The INF copies vhfkey.sys from the driver directory, not from out/, so the two have to be the same
+# file. Leaving the copy to be done by hand has now caused two crashes: the driver directory held a
+# binary built against KMDF 1.35 while out/ held the corrected 1.31 build, and the package that got
+# installed was the stale one. The build does the copy so that installing what was just built is the
+# only thing it can do.
+$stagedSys = Join-Path $driver 'vhfkey.sys'
+Copy-Item $sys $stagedSys -Force
+$builtHash = (Get-FileHash $sys -Algorithm SHA256).Hash
+$stagedHash = (Get-FileHash $stagedSys -Algorithm SHA256).Hash
+if ($builtHash -ne $stagedHash) { throw 'staged binary does not match the built one' }
+Write-Output "  staged: $stagedSys  ($([math]::Round((Get-Item $stagedSys).Length/1KB,1)) KB, sha $($stagedHash.Substring(0,16)))"
+# A stale catalog would no longer cover the binary, and the package would be rejected at install time.
+Remove-Item (Join-Path $driver 'vhfkey.cat') -Force -ErrorAction SilentlyContinue
+Write-Output '  removed the stale catalog; install.ps1 regenerates and signs it'
 
 # ---------------------------------------------------------------------------------------------
 Step '4. build the user-mode client'
