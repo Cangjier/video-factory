@@ -27,16 +27,18 @@ export function createAnalyzeTool(actions) {
   return defineFamilyTool({
     name: ANALYZE_TOOL_NAME,
     description:
-      'Find out what a video contains before editing it: which moments are worth looking at, and what its soundtrack actually is. Both actions report measurements and never choose for you.',
+      'Find out what a video contains before editing it, and cut a subject out of its backdrop. Every action reports measurements or produces a defined artifact; none of them chooses for you.',
     actionsHelp:
       'sample_frames: score every decoded frame against its predecessor and return the moments worth a look, each with the reason it was picked (scene_change / motion / periodic / max_interval_fallback), its sceneScore, and its timestamp. Optionally writes those frames as JPEGs so they can be read as images. ' +
       'audio_events: classify the soundtrack into AudioSet\'s 521 acoustic classes with per-segment timestamps — how you find out where music starts, or that a stretch is silence, which transcription cannot tell you. ' +
-      'audio_status: report whether the audio classifier is installed and what it can do, without analysing anything.',
-    actions: ['sample_frames', 'audio_events', 'audio_status'],
+      'audio_status: report whether the audio classifier is installed and what it can do, without analysing anything. ' +
+      'matte: cut a subject out of its backdrop with a learned model and write a PNG with a transparent background — one image, or one frame of a video when "at" is given. This is the route for a backdrop that is not a flat colour; a green screen should use the plan-level chroma_key instead, which is exact and about two thousand times cheaper. ' +
+      'matte_status: report whether the matting model is installed, and when given a "duration", what a video matte would cost at several mask rates.',
+    actions: ['sample_frames', 'audio_events', 'audio_status', 'matte', 'matte_status'],
     extraProperties: {
       target: {
         type: 'string',
-        description: 'sample_frames / audio_events: the video (or audio file) to analyse.',
+        description: 'sample_frames / audio_events / matte: the file to analyse. matte also accepts a still image.',
       },
       strategy: {
         type: 'string',
@@ -115,6 +117,29 @@ export function createAnalyzeTool(actions) {
         type: 'boolean',
         description:
           'audio_events: include the per-segment labels in the result. Default true; set false for just the grouped label-to-timestamps map.',
+      },
+      at: {
+        type: 'number',
+        description:
+          'matte: the second of the video to cut out. Omit it to treat "target" as a still image. One frame per call on purpose — about two seconds of compute each.',
+      },
+      feather: {
+        type: 'number',
+        description:
+          'matte: blur the mask edge by this many pixels before compositing. Default 0. A hard model edge on a new background reads as a cut-out sticker; 1–3 reads as a photograph.',
+      },
+      keepMask: {
+        type: 'boolean',
+        description: 'matte: keep the intermediate greyscale mask beside the PNG. Default false.',
+      },
+      name: {
+        type: 'string',
+        description: 'matte: output file stem. Default "matte".',
+      },
+      duration: {
+        type: 'number',
+        description:
+          'matte_status: when given, report what a video matte of this many seconds would cost at several mask rates, so the rate can be chosen with the price in view.',
       },
       cwd: CWD_PROPERTY,
     },

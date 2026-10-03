@@ -1,9 +1,10 @@
 /**
- * `video_analyze` actions: adaptive frame sampling and audio event detection.
+ * `video_analyze` actions: adaptive frame sampling, audio event detection, and matting.
  *
- * Both actions are measurements. `sample_frames` says where the cuts and the movement are;
- * `audio_events` says what the soundtrack is and when. Neither says which shot to use, how
- * long to hold it, or whether the result is any good — that stays with DSH.
+ * Every action here is a measurement or a transform of the analysis kind. `sample_frames` says
+ * where the cuts and the movement are; `audio_events` says what the soundtrack is and when;
+ * `matte` separates a subject from its backdrop. None of them says which shot to use, how long to
+ * hold it, or whether the result is any good — that stays with DSH.
  *
  * @module video-factory/tools/analyze-actions
  */
@@ -13,8 +14,13 @@ import { run } from '../core/ffmpeg.mjs'
 import { sampleFrames } from '../core/sampling.mjs'
 import { AUDIO_TMP_DIR, detectAudioEvents, audioEventState } from '../core/audio-events.mjs'
 import { audioInstallState } from '../core/audio-install.mjs'
+import { MATTE_TMP_DIR, matteImage, matteState, planMasks } from '../core/matte.mjs'
+import { matteInstallState } from '../core/matte-install.mjs'
 import { PLUGIN_ROOT } from '../core/env.mjs'
 import { VideoFactoryError } from './shared.mjs'
+
+/** Where matted PNGs go when no directory is named. */
+const DEFAULT_MATTE_DIR = join(PLUGIN_ROOT, 'tmp', 'matte', 'out')
 
 /** Where extracted frames go when no directory is named. */
 const DEFAULT_FRAME_DIR = join(PLUGIN_ROOT, 'tmp', 'frames')
@@ -226,6 +232,112 @@ export function createAnalyzeActions(config, logger) {
         runtime: state.runtime,
         scratchDir: AUDIO_TMP_DIR,
       }
+    },
+
+    /**
+     * Cut a subject out of its backdrop.
+     *
+     * One image, or if `at` is given, one frame of a video. Deliberately not a whole video: the
+     * measured cost is about two seconds per frame on one WASM thread, so a caller has to decide
+     * per frame whether it is worth it. The plan-level `matte` block is the route for a video,
+     * because there `maskFps` makes the trade-off explicit.
+     *
+     * @param {object} args - the tool arguments.
+     * @param {object} context - the tool context.
+     * @returns {Promise<object>} the matte report.
+     */
+    async matte(args, context) {
+      if (typeof args.target !== 'string' || args.target === '') {
+        throw new VideoFactoryError('video_analyze matte: 需要 "target"（要抠图的图片或视频）。')
+      }
+      const source = resolve(context.cwd, args.target)
+      if (!existsSync(source)) {
+        throw new VideoFactoryError(`video_analyze matte: 文件不存在：${source}`)
+      }
+
+      const outDir = typeof args.outDir === 'string' && args.outDir !== ''
+        ? resolve(context.cwd, args.outDir)
+        : DEFAULT_MATTE_DIR
+      mkdirSync(outDir, { recursive: true })
+      const stem = args.name === undefined ? 'matte' : String(args.name).replace(/[^\w.-]+/g, '_')
+      const target = join(outDir, `${stem}.png`)
+
+      try {
+        const result = await matteImage(source, target, {
+          config,
+          at: Number.isFinite(args.at) ? args.at : undefined,
+          feather: Number.isFinite(args.feather) ? args.feather : undefined,
+          keepMask: args.keepMask === true,
+        })
+        const degenerate =
+          result.statistics.foregroundRatio < 0.005 || result.statistics.foregroundRatio > 0.995
+        return {
+          ...result,
+          warnings: degenerate
+            ? [
+                `遮罩几乎全为${result.statistics.foregroundRatio > 0.5 ? '前景' : '背景'}` +
+                  `（前景占比 ${(result.statistics.foregroundRatio * 100).toFixed(2)}%），` +
+                  '模型可能没在这张图上找到主体；请先看这张 PNG 再决定是否使用。',
+              ]
+            : [],
+          notes: [
+            '输出是带 alpha 的 PNG，可直接作为图层素材。',
+            '模型固定 320x320 输入，遮罩被放大回原尺寸；边缘靠 feather 平滑，不靠模型精度。',
+          ],
+        }
+      } catch (error) {
+        throw asToolError('matte', error)
+      }
+    },
+
+    /**
+     * Report whether the matting model is installed, and what a video matte would cost.
+     *
+     * @param {object} args - the tool arguments.
+     * @returns {object} the state.
+     */
+    async matte_status(args = {}) {
+      const state = matteState()
+      if (!state.available) {
+        return {
+          ...state,
+          installWith: state.missing.includes('model')
+            ? 'video_env {action:"install_matte"}'
+            : 'video_env {action:"install_audio"}（推理运行时由它提供）',
+        }
+      }
+      const installed = matteInstallState()
+      const response = {
+        available: true,
+        model: state.model,
+        runtime: state.runtime,
+        modelBytes: installed.installedBytes,
+        runtimeShared: true,
+        runtimeDir: state.runtimeDir,
+        scratchDir: MATTE_TMP_DIR,
+        measuredMsPerMask: 2071,
+        notes: [
+          '抠图与音频事件检测共用同一个 WASM 运行时（vendor/audio/runtime），所以抠图本身只占 4.36 MB。',
+          '实测单帧 320x320 约 2.1 秒（单线程 WASM，CPU）。多线程实测仅 1.08x，所以不做线程池。',
+        ],
+      }
+      // If a duration is supplied, answer the question the caller actually has: what will this
+      // cost? The rate is theirs to choose, so this reports rather than decides.
+      if (Number.isFinite(args.duration) && args.duration > 0) {
+        response.cost = [4, 8, 12, 30]
+          .filter((fps) => fps <= 30)
+          .map((maskFps) => {
+            const plan = planMasks({ maskFps, duration: Number(args.duration), estimatedMsPerMask: 2071 })
+            return {
+              maskFps,
+              masks: plan.masks,
+              estimatedMinutes: plan.estimatedSeconds === null ? null : Number((plan.estimatedSeconds / 60).toFixed(1)),
+            }
+          })
+        response.costNote =
+          '遮罩率由调用方决定：越高过渡越顺、耗时越长。每个遮罩会被保持到下一个遮罩出现，所以低遮罩率的代价是遮罩边缘的跳动。'
+      }
+      return response
     },
   }
 }

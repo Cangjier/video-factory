@@ -21,6 +21,7 @@ import { copyFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'no
 import { basename, join, resolve } from 'node:path'
 import { FFmpegError, run } from './ffmpeg.mjs'
 import { applyOverlays, atempoChain, chromaKeyComposite, fitFilters, motionFilters, toFfmpegColor } from './filter.mjs'
+import { matteState, matteVideo, videoMatteArguments } from './matte.mjs'
 import { probe } from './probe.mjs'
 import { fontDirectories } from './env.mjs'
 
@@ -197,7 +198,31 @@ export async function sceneArguments(scene, plan, options) {
     `,setsar=1,fps=${fps.toFixed(6)},trim=duration=${duration.toFixed(3)},` +
     'setpts=PTS-STARTPTS,setrange=tv,format=yuv420p'
   const keyed = keyedChain([...inputs], chain, scene.chromaKey, width, height, fps, duration, scene.overlays.length > 0)
-  const videoChain = keyed.prefixed ? keyed.chain : `[0:v]${keyed.chain}`
+  // Learned matting is the expensive alternative to a chroma key, and it is applied to the same
+  // point in the graph so the two are mutually exclusive by construction: a scene that asks for
+  // both would key a frame that has already been composited onto a new background.
+  if (keyed.prefixed && scene.matte !== null && scene.matte !== undefined && scene.matte.enabled === true) {
+    throw new BuildError(
+      `镜头 ${scene.id}：chroma_key 与 matte 不能同时使用。两者都是把主体从背景里分离出来，` +
+        '同时配置会先抠一次再抠一次，请二选一：纯色背板用 chroma_key，其它用 matte。',
+    )
+  }
+  const matted = await matteChain(keyed.inputs, keyed.chain, scene.matte, {
+    source,
+    width,
+    height,
+    fps,
+    duration,
+    workDir: options.workDir,
+    sceneId: scene.id,
+    config: options.config,
+    onProgress: options.onProgress,
+  })
+  const videoChain = matted.prefixed
+    ? matted.chain
+    : keyed.prefixed
+      ? keyed.chain
+      : `[0:v]${keyed.chain}`
   const video = `${applyOverlays(videoChain, scene.overlays, overlayContext)}[v]`
 
   let audio
@@ -214,7 +239,7 @@ export async function sceneArguments(scene, plan, options) {
     audio = `[0:a]${audioChain}[a]`
   }
 
-  return { inputs: keyed.inputs, video, audio, tail }
+  return { inputs: matted.inputs, video, audio, tail, matte: matted.mask }
 }
 
 /**
@@ -285,6 +310,97 @@ function keyedChain(inputs, chain, chromaKey, width, height, fps, duration, hasO
   const keyedForeground = foreground.replace('[0:v]', `[0:v]${body},`)
   const composed = [keyedForeground, ...rest].join(';')
   return { inputs, chain: `${composed}${opaqueTail}`, prefixed: true }
+}
+
+/**
+ * Fold a scene's learned matting into its video chain, computing the mask sequence first.
+ *
+ * **This is the expensive path and it is entered only when the scene actually renders.** The
+ * mask sequence costs one model inference per `1/mask_fps` of footage — measured at roughly 2.1 s
+ * each — so a 20-second shot at 8 masks per second is about 5.6 minutes of compute before ffmpeg
+ * starts. The intermediate-clip cache above is what keeps that from happening twice for an
+ * unchanged scene, and `mask_fps` is the knob the caller uses to decide how much of it to pay for.
+ *
+ * The masks are held across output frames by declaring the sequence's own frame rate, so judder at
+ * a low `mask_fps` is a property of the chosen rate, not something smoothed away here.
+ *
+ * @param {string[]} inputs - the scene's existing input arguments.
+ * @param {string} chain - the scene's video filter chain, beginning after `[0:v]`.
+ * @param {object|null} matte - the scene's validated matte block.
+ * @param {object} spec - `{ source, width, height, fps, duration, workDir, sceneId, config, onProgress }`.
+ * @returns {Promise<{inputs: string[], chain: string, prefixed: boolean, mask: object|null}>} the outcome.
+ * @throws {BuildError} when the model is missing, the background is absent, or masks cannot be made.
+ */
+async function matteChain(inputs, chain, matte, spec) {
+  if (matte === null || matte === undefined || matte.enabled !== true) {
+    return { inputs, chain, prefixed: false, mask: null }
+  }
+
+  const state = matteState()
+  if (!state.available) {
+    throw new BuildError(`镜头 ${spec.sceneId}：配置了 matte，但抠图模型不可用。${state.reason ?? ''}`.trim())
+  }
+  if (matte.background === null || matte.background === '') {
+    throw new BuildError(
+      `镜头 ${spec.sceneId}：matte 需要 background。抠像产生的是 alpha，不合成到某个背景上就没有可观察的结果。`,
+    )
+  }
+
+  const maskDir = join(spec.workDir, 'masks', spec.sceneId)
+  let mask
+  try {
+    mask = await matteVideo(spec.source, maskDir, {
+      config: spec.config,
+      maskFps: matte.maskFps,
+      duration: spec.duration,
+      onProgress: (progress) =>
+        spec.onProgress?.(`镜头 ${spec.sceneId}：抠图遮罩 ${progress.done}/${progress.total}`),
+    })
+  } catch (error) {
+    throw new BuildError(
+      `镜头 ${spec.sceneId}：生成抠图遮罩失败。${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+  if (mask.count === 0) {
+    throw new BuildError(`镜头 ${spec.sceneId}：没有生成任何遮罩，无法合成。`)
+  }
+
+  let built
+  try {
+    built = videoMatteArguments({
+      maskDir,
+      maskCount: mask.count,
+      maskFps: matte.maskFps,
+      width: spec.width,
+      height: spec.height,
+      fps: spec.fps,
+      duration: spec.duration,
+      background: matte.background,
+    })
+  } catch (error) {
+    throw new BuildError(`镜头 ${spec.sceneId}：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // The scene's own processing runs first, so the mask is applied to the fitted, retimed frame
+  // rather than to the raw source. The trailing opaque conversion is dropped because the graph
+  // ends in `format=yuv420p` itself, after the overlay.
+  const OPAQUE = ',format=yuv420p'
+  const opaqueTail = chain.endsWith(OPAQUE) ? OPAQUE : ''
+  const body = opaqueTail === '' ? chain : chain.slice(0, -OPAQUE.length)
+  const spliced = built.graph.replace('[0:v]', `[0:v]${body},`)
+
+  return {
+    inputs: [...inputs, ...built.inputs],
+    chain: spliced,
+    prefixed: true,
+    mask: {
+      ...mask,
+      maskFps: matte.maskFps,
+      background: matte.background,
+      feather: matte.feather,
+      notes: [...mask.notes, ...built.notes],
+    },
+  }
 }
 
 /**

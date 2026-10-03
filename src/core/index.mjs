@@ -203,3 +203,38 @@ export {
   verifyInstalledAudio,
   writeAudioManifest,
 } from './audio-install.mjs'
+
+export {
+  DEFAULT_MASK_FPS,
+  MATTE_MODEL,
+  MATTE_MODEL_SPEC,
+  MATTE_SIDE,
+  MATTE_TMP_DIR,
+  MATTE_VENDOR_DIR,
+  MAX_MASKS,
+  MAX_MASK_FPS,
+  MatteError,
+  decodeToTensor,
+  disposeMatteSession,
+  durationOf as matteDurationOf,
+  loadMatteSession,
+  maskStatistics,
+  matteFrame,
+  matteImage,
+  matteState,
+  matteVideo,
+  normaliseMask,
+  planMasks,
+  writeMaskPng,
+} from './matte.mjs'
+
+export {
+  MATTE_MANIFEST,
+  MATTE_SCRATCH_DIR,
+  installMatte,
+  matteInstallState,
+  removeMatte,
+  sha256File as sha256OfMatte,
+  verifyInstalledMatte,
+  writeMatteManifest,
+} from './matte-install.mjs'

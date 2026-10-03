@@ -156,6 +156,33 @@ function parseChromaKey(raw, where) {
 }
 
 /**
+ * Parse a scene's learned-matting block.
+ *
+ * The `mask_fps` field is the whole point of this block and is deliberately left without a
+ * creative default: it is the trade between how smooth the mask edge moves and how long the
+ * render takes, and that judgement belongs to whoever is planning the cut. The plugin executes
+ * the rate it is given and reports what the rate cost.
+ *
+ * @param {object|undefined} raw - the decoded block.
+ * @param {string} where - location used in the error message.
+ * @returns {object|null} the block, or null when the scene is not matted.
+ */
+function parseMatte(raw, where) {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new PlanError(`${where}: expected an object like { mask_fps, background, feather }`)
+  }
+  const enabled = raw.enabled === undefined ? true : Boolean(raw.enabled)
+  return {
+    enabled,
+    model: raw.model === undefined || raw.model === null ? 'u2netp' : String(raw.model),
+    maskFps: raw.mask_fps === undefined ? 8 : numberField(raw.mask_fps, `${where}.mask_fps`, 0.5, 30),
+    background: raw.background === undefined || raw.background === null ? null : String(raw.background),
+    feather: raw.feather === undefined ? 0 : numberField(raw.feather, `${where}.feather`, 0, 24),
+  }
+}
+
+/**
  * Parse one text overlay.
  * @param {object} raw - the decoded overlay.
  * @param {string} where - location used in the error message.
@@ -255,6 +282,7 @@ function parseScene(raw, index) {
     transition: parseTransition(raw.transition, `${where}.transition`),
     fit: raw.fit === undefined ? 'cover' : enumField(raw.fit, FIT_TYPES, `${where}.fit`, 'fit'),
     chromaKey: parseChromaKey(raw.chroma_key ?? raw.chromaKey, `${where}.chroma_key`),
+    matte: parseMatte(raw.matte, `${where}.matte`),
     start: raw.start === undefined ? 0 : numberField(raw.start, `${where}.start`, 0),
     speed: raw.speed === undefined ? 1 : numberField(raw.speed, `${where}.speed`, 0.1, 10),
     volume: raw.volume === undefined ? 1 : numberField(raw.volume, `${where}.volume`, 0, 4),

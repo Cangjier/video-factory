@@ -27,8 +27,9 @@ export function createEnvTool(actions) {
       'This never picks, ranks, or drops material; choosing is yours. ' +
       'install_ffmpeg: download a pinned ffmpeg static build into vendor/ when "probe" reports it missing. Needs the network and a few hundred megabytes. ' +
       'install_ocr: download and unpack a pinned offline OCR engine into vendor/ocr/ so video_inspect {action:"ocr"} can read text accurately; without it those actions fall back to the Windows recogniser, which misreads small mixed-script text. Also removes an installation when "remove" is true. ' +
-      'install_audio: download the pinned YAMNet model (AudioSet 521 classes) and the WASM inference runtime into vendor/audio/ so video_analyze {action:"audio_events"} can identify music, ambience, and sound effects. About 28MB, no Python and no GPU. Also removes the installation when "remove" is true.',
-    actions: ['probe', 'presets', 'scan', 'install_ffmpeg', 'install_ocr', 'install_audio'],
+      'install_audio: download the pinned YAMNet model (AudioSet 521 classes) and the WASM inference runtime into vendor/audio/ so video_analyze {action:"audio_events"} can identify music, ambience, and sound effects. About 28MB, no Python and no GPU. Also removes the installation when "remove" is true. ' +
+      'install_matte: download the pinned 4.36MB U²-Net model into vendor/matte/ so video_analyze {action:"matte"} can cut a subject out of a backdrop that is not a flat colour. Reuses the inference runtime install_audio provides, so a second copy is never fetched. Also removes the model when "remove" is true.',
+    actions: ['probe', 'presets', 'scan', 'install_ffmpeg', 'install_ocr', 'install_audio', 'install_matte'],
     extraProperties: {
       root: { type: 'string', description: 'Material folder to inventory. Required for "scan".' },
       recursive: { type: 'boolean', description: 'scan: descend into subdirectories. Defaults to true.' },
@@ -55,7 +56,7 @@ export function createEnvTool(actions) {
       archive: {
         type: 'string',
         description:
-          'install_ocr / install_audio: path to a local package to use instead of downloading it. For OCR that is the engine .7z; for audio it is the YAMNet .onnx. Use this when the host serving the file is slow or blocked — the file arrives by whatever means and its SHA-256 is still checked against the pinned one.',
+          'install_ocr / install_audio / install_matte: use a local package instead of downloading it. For ocr that is the engine .7z, for audio the YAMNet .onnx, for matte the U²-Net .onnx. Use this when the host serving the file is slow or blocked — the file arrives by whatever means and its SHA-256 is still checked against the pinned one.',
       },
       remove: {
         type: 'boolean',

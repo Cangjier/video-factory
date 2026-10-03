@@ -27,6 +27,11 @@ vendor/ocr/
 # src/core/audio-install.mjs, which is tracked. Regenerate with `install-audio`.
 vendor/audio/
 
+# Vendored matting model: fetched by `video_env {action:"install_matte"}`. 4.36 MB, and its
+# inference runtime is shared with vendor/audio rather than fetched twice, which is why this
+# directory holds only the model. vendor/matte/SOURCE.json records the hash and provenance.
+vendor/matte/
+
 # Generated stills: reproducible from their prompts, and the point of them is to be
 # produced again, not stored.
 generated/

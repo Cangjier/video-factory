@@ -14,19 +14,19 @@ DSH 决定做什么  →  video_* 工具确定性地执行
 
 ## 工具
 
-插件注册 7 个工具，共 33 个 action。每个工具的 schema 每轮都会进入模型上下文，所以按操作族分组、族内用 `action` 分派，而不是摊成三十多个独立工具。
+插件注册 7 个工具，共 36 个 action。每个工具的 schema 每轮都会进入模型上下文，所以按操作族分组、族内用 `action` 分派，而不是摊成三十多个独立工具。
 
 | 工具 | action | 做什么 |
 | --- | --- | --- |
-| `video_env` | `probe` `presets` `scan` `install_ffmpeg` `install_ocr` `install_audio` | 环境自检、画布预设、素材盘点、装 ffmpeg、装离线 OCR 引擎、装音频事件模型 |
+| `video_env` | `probe` `presets` `scan` `install_ffmpeg` `install_ocr` `install_audio` `install_matte` | 环境自检、画布预设、素材盘点、装 ffmpeg / OCR / 音频模型 / 抠像模型 |
 | `video_narrate` | `synthesize` `to_cues` `srt_write` `srt_read` `layout` `transcribe` | 文案→配音+逐词时间戳；断句；SRT 读写；字幕排版；**语音转文字** |
 | `video_plan` | `check` `duration` `fields` `diagnose` | 计划校验、精确时长、字段速查、客观问题诊断 |
 | `video_render` | `scene` `assemble` `finalize` `deliver` `build` | 单镜头、拼接、合成、交付、整链 |
 | `video_inspect` | `verify` `media` `ocr` `find_text` `ocr_status` | 成片验收、媒体元信息、**读图取字（带坐标）**、**定位文字** |
 | `video_gen` | `models` `generate` `image_models` `image` | 方舟模型发现；**文生视频**；**文生图** |
-| `video_analyze` | `sample_frames` `audio_events` `audio_status` | **自适应抽帧**（找剪切点与运动）、**音频事件识别**（音乐/环境音/音效） |
+| `video_analyze` | `sample_frames` `audio_events` `audio_status` `matte` `matte_status` | **自适应抽帧**、**音频事件识别**、**抠像** |
 
-**先说清楚边界**：`scan` 只盘点不取舍（重复图**标注**而非删除）；`check` 只判断不修改；`diagnose` 只报客观事实（"静止图没给 motion"），不报品味（"这个镜头该放前面"）；`sample_frames` 报"哪一帧动了、动了多少"和选中它的理由，不报"这个运镜好不好"；`audio_events` 报"这一段是什么声音"，不报"配乐合不合适"。`video_gen` 是**唯一不满足"同输入同输出"**的工具——同 prompt 不同结果，它是执行器不是确定性算子。
+**先说清楚边界**：`scan` 只盘点不取舍（重复图**标注**而非删除）；`check` 只判断不修改；`diagnose` 只报客观事实（"静止图没给 motion"），不报品味（"这个镜头该放前面"）；`sample_frames` 报"哪一帧动了、动了多少"和选中它的理由，不报"这个运镜好不好"；`audio_events` 报"这一段是什么声音"，不报"配乐合不合适"；`matte` 报"这是主体"，不报"抠得好不好"。`video_gen` 是**唯一不满足"同输入同输出"**的工具——同 prompt 不同结果，它是执行器不是确定性算子。
 
 ---
 
@@ -210,6 +210,63 @@ video_analyze {action: "sample_frames", target: "out/final.mp4", extract: true}
 
 ---
 
+## 抠像：背景不是纯色时（可选）
+
+绿幕用上面的 `chroma_key`，**免费且精确**。背景是任意照片或运动镜头时，才需要学习式抠像。
+
+```
+video_env {action: "install_matte"}                              # 4.36 MB
+video_analyze {action: "matte", target: "素材/人物.jpg"}          # 输出透明背景 PNG
+video_analyze {action: "matte_status", duration: 20}             # 先问要花多少时间
+```
+
+| 项 | 说明 |
+| --- | --- |
+| 模型 | **U²-Net p**（显著性目标抠像，ONNX），**Apache-2.0** |
+| 体积 | **仅 4.36 MB** —— 推理运行时**与音频事件检测共用**，不重复下载 |
+| 速度 | 实测 **1.9–2.4 秒/帧**（320×320，单线程 WASM，CPU） |
+| 几何 | 输入固定 `[1,3,320,320]`；输出 7 个 `[1,1,320,320]`，**首位是融合预测** |
+| 输出 | 带 alpha 的 PNG；遮罩被放大回原尺寸，边缘靠 `feather` 平滑 |
+| 校验 | sha256 硬校验；`modelArchive` 可指向本地 `.onnx`；幂等 |
+| 删除 | `video_env {action:"install_matte", remove: true}`（**保留共享运行时**，不会顺手弄坏音频检测） |
+
+### 视频抠像：`mask_fps` 由你（或 DSH）决定
+
+计划里给镜头加 `matte` 块，就得到逐帧抠像并换背景：
+
+```jsonc
+{
+  "id": "s01", "kind": "video", "source": "素材/人物.mp4",
+  "matte": {
+    "enabled": true,
+    "mask_fps": 8,            // ← 遮罩帧率：越高过渡越顺，耗时越长
+    "background": "#102040",  // 必须给，否则 alpha 会被编码器丢掉
+    "feather": 1              // 边缘羽化，1–3 像素能去掉"贴纸感"
+  }
+}
+```
+
+**为什么 `mask_fps` 是个参数而不是内置默认**：它是"过渡平滑度 ↔ 渲染耗时"的权衡，取决于镜头里有没有转身、手势、快速运动——这是**创作判断**，归 DSH。插件执行给定的帧率，并如实回报成本。
+
+实现上，遮罩序列以 `mask_fps` 声明的帧率喂给 ffmpeg，于是**每个遮罩被保持到下一个遮罩出现**。所以低遮罩率的表现是遮罩边缘的跳动，这是所选帧率的性质，不是 bug。
+
+| mask_fps | 1 分钟 30fps 成片的推理耗时（实测外推） |
+| --- | --- |
+| 4 | 约 13 分钟 |
+| 8 | 约 26 分钟 |
+| 12 | 约 39 分钟 |
+| 30（逐帧） | 约 52 分钟 |
+
+**实测硬件上限**：无 GPU、CPU + 单线程 WASM。16 线程实测只有 **1.08x** 加速，所以不做线程池——这条路的天花板就在这里。
+
+| 限制 | 说明 |
+| --- | --- |
+| 与 `chroma_key` 不能同时用 | 两者都是"把主体从背景分离"，同时配置会先抠一次再抠一次，直接报错 |
+| 与 `overlays[]` 不能同时用 | 合成把滤镜图拆成多段并引入第二个输入，文字叠加需要另接一段，尚未实现 |
+| 背景仅支持纯色 | 图片/视频背景需要第二个输入，尚未实现 |
+
+---
+
 ## DSH 能"看懂"一条视频吗？
 
 能看画面，也能识别声音类别了。但有几件事仍然做不到，分开说清楚：
@@ -221,6 +278,8 @@ video_analyze {action: "sample_frames", target: "out/final.mp4", extract: true}
 | 抽帧落盘再逐张看图 | ✅ `sample_frames {extract:true}` 写出 JPEG，路径直接可读 |
 | 语音转文字 | ✅ 启用语音 bundle 后，`video_narrate {action:"transcribe"}` |
 | 识别音乐 / 环境音 / 音效 | ✅ `video_analyze {action:"audio_events"}`（需先 `install_audio`） |
+| 抠出主体（绿幕） | ✅ `plan.json` 的 `chroma_key`，零模型零成本 |
+| 抠出主体（任意背景） | ✅ `plan.json` 的 `matte` 或 `video_analyze {action:"matte"}`（需先 `install_matte`）；**约 2 秒/帧** |
 | 逐帧扫全片的**画面含义** | ⚠️ 可行但慢、费上下文；关键帧已能自动筛，但每张图仍要进上下文 |
 | 判断**响度**是否合规 | ⚠️ 渲染链用 EBU R128 归一，但**读不出"这段响不响"**的感知判断 |
 | **判断运镜舒不舒服** | ❌ **本质限制**：差值法能给出"哪里在动、动得多剧烈"，给不出"这个推拉好不好看" |
@@ -247,12 +306,14 @@ node src/bin/vf.mjs ocr 截图.png --region 600,100,620,56 --scale auto --find "
 node src/bin/vf.mjs install-audio                                  # 装音频事件模型 + WASM 运行时
 node src/bin/vf.mjs frames out/final.mp4 --probe-fps 6             # 自适应抽帧
 node src/bin/vf.mjs audio out/final.mp4 --top-k 2 --min-score 0.2   # 音频事件识别
+node src/bin/vf.mjs install-matte                                  # 装抠像模型（4.36 MB）
+node src/bin/vf.mjs matte 素材/人物.jpg --feather 1                 # 抠出主体，输出透明 PNG
 ```
 
 ## 端到端验证
 
 ```powershell
-node --test "tests/*.test.mjs"                                    # 189 个离线用例
+node --test "tests/*.test.mjs"                                    # 214 个离线用例
 node src/bin/vf.mjs render --plan examples/demo/plan.json --all --out examples/demo/out
 node src/bin/vf.mjs probe examples/demo/out/final.mp4
 ```
@@ -302,6 +363,7 @@ src/core/*.mjs         确定性内核：纯 ESM、零第三方依赖、可离�
 vendor/ffmpeg/         静态 ffmpeg 构建
 vendor/ocr/            离线 OCR 引擎（可选；装之前 OCR 走 Windows 自带识别）
 vendor/audio/          YAMNet 模型 + WASM 推理运行时（可选；装之前 audio_events 不可用）
+vendor/matte/          U²-Net 抠像模型（可选；运行时与 vendor/audio 共用，不重复下载）
 ```
 
 **内核不依赖 DSH**，所以"确定性"可离线证明。渲染分四阶段，每阶段独立可调、独立缓存：

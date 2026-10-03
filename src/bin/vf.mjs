@@ -21,6 +21,8 @@ import { findLines, ocrReport, parseRegion, readText } from '../core/ocr.mjs'
 import { sampleFrames } from '../core/sampling.mjs'
 import { audioEventState, detectAudioEvents } from '../core/audio-events.mjs'
 import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
+import { matteImage, matteState } from '../core/matte.mjs'
+import { installMatte, removeMatte, verifyInstalledMatte } from '../core/matte-install.mjs'
 import { describe as describeInventory, inventoryToJson, scan } from '../core/materials.mjs'
 import { estimatedDuration, fieldReference, loadResolvedPlan } from '../core/plan.mjs'
 import { probe } from '../core/probe.mjs'
@@ -70,6 +72,7 @@ const COMMANDS = {
       vendored: vendoredBuild(),
       ocr: ocrReport({}),
       audio: audioEventState(),
+      matte: matteState(),
       arkKeyPresent: typeof process.env.ARK_API_KEY === 'string' && process.env.ARK_API_KEY !== '',
       problems,
     }
@@ -229,6 +232,44 @@ const COMMANDS = {
       }
     }
     return 0
+  },
+
+  /** Install, or remove, the matting model. */
+  async 'install-matte'(options) {
+    if (options.remove === true) {
+      const result = removeMatte({ onProgress: (message) => console.error(message) })
+      emit({ ...result, state: matteState() })
+      return 0
+    }
+    const result = await installMatte({
+      force: options.force === true,
+      modelArchive: options.archive,
+      onProgress: (message) => console.error(message),
+    })
+    emit({ ...result, state: matteState(), verify: verifyInstalledMatte() })
+    return 0
+  },
+
+  /** Cut a subject out of its backdrop, one image or one frame of a video. */
+  async matte(options) {
+    const target = options.paths?.[0]
+    if (target === undefined) throw new Error('matte: <图片或视频> is required')
+    const result = await matteImage(resolve(target), resolve(options.out ?? 'matte.png'), {
+      config: {},
+      at: numberOrUndefined(options.at),
+      feather: numberOrUndefined(options.feather),
+      keepMask: options['keep-mask'] === true,
+    })
+    if (options.json === true) emit(result)
+    else {
+      console.log(
+        `抠图完成：${result.width}x${result.height}，推理 ${result.inferenceMs} ms，` +
+          `前景占比 ${(result.statistics.foregroundRatio * 100).toFixed(2)}%`,
+      )
+      console.log(`  ${result.path}`)
+      if (result.maskPath !== null) console.log(`  遮罩：${result.maskPath}`)
+    }
+    return result.statistics.foregroundRatio < 0.005 || result.statistics.foregroundRatio > 0.995 ? 1 : 0
   },
 
   /** Inventory a material folder. */
@@ -401,6 +442,10 @@ async function main() {
                                        自适应抽帧：找剪切点与运动，报出每帧的选中理由与分值
   audio <文件> [--start 秒] [--duration 秒] [--top-k 3] [--min-score 0.1] [--json]
                                        识别音轨里的声学事件（音乐/环境音/音效）与时间点
+  install-matte [--force] [--archive <本地.onnx>] [--remove]
+                                       把 U²-Net 抠图模型装进 vendor/matte/（运行时与 audio 共用）
+  matte <图片|视频> [--at <秒>] [--feather <像素>] [--out <png>] [--keep-mask] [--json]
+                                       抠出主体，输出透明背景 PNG（单帧约 2 秒）
   scan <目录> [--json] [--no-dedupe] 盘点素材
   fields                             打印 plan.json 字段速查
   check --plan <plan.json>           校验计划并报时长
@@ -461,6 +506,9 @@ async function main() {
       duration: { type: 'string' },
       'top-k': { type: 'string' },
       'min-score': { type: 'string' },
+      at: { type: 'string' },
+      feather: { type: 'string' },
+      'keep-mask': { type: 'boolean' },
       prune: { type: 'boolean' },
       remove: { type: 'boolean' },
       json: { type: 'boolean' },

@@ -20,6 +20,8 @@ import {
 import { ocrReport } from '../core/ocr.mjs'
 import { audioEventState } from '../core/audio-events.mjs'
 import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
+import { matteState } from '../core/matte.mjs'
+import { installMatte, removeMatte, verifyInstalledMatte } from '../core/matte-install.mjs'
 import {
   MaterialError,
   describe as describeInventory,
@@ -84,6 +86,11 @@ export function createEnvActions(config, logger) {
           requiresKey: false,
         },
         pathBudget: config.pathBudget,
+        // Optional models, reported as facts rather than as problems: the plugin works without
+        // any of them, and a missing model only disables the action that needs it.
+        ocr: ocrReport(config),
+        audio: audioEventState(),
+        matte: matteState(),
       }
 
       if (ffmpeg === null) {
@@ -333,6 +340,40 @@ export function createEnvActions(config, logger) {
         }
       } catch (error) {
         throw new VideoFactoryError(`安装音频事件检测失败：${error.message}`)
+      }
+    },
+
+    /**
+     * Provision the matting model.
+     *
+     * Only the 4.36 MB model: the inference runtime it shares with audio event detection is
+     * installed by `install_audio`, and `matteState` says so when it is missing rather than
+     * fetching a second copy of the same 13 MB.
+     *
+     * @param {object} args - the request.
+     * @returns {Promise<object>} the installation state.
+     */
+    async install_matte(args) {
+      if (args.remove === true) {
+        const result = removeMatte({ onProgress: (line) => logger.info(`video-factory install_matte: ${line}`) })
+        return {
+          removed: result.removed,
+          directory: result.directory,
+          keptRuntime: result.keptRuntime,
+          reason: result.removed ? '已删除（共享运行时保留）' : '本来就没有安装',
+          state: matteState(),
+        }
+      }
+
+      try {
+        const result = await installMatte({
+          force: args.force === true,
+          modelArchive: typeof args.archive === 'string' && args.archive !== '' ? resolve(args.archive) : undefined,
+          onProgress: (line) => logger.info(`video-factory install_matte: ${line}`),
+        })
+        return { ...result, state: matteState(), verify: verifyInstalledMatte() }
+      } catch (error) {
+        throw new VideoFactoryError(`安装抠图模型失败：${error.message}`)
       }
     },
   }
