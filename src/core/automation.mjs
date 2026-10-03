@@ -88,6 +88,35 @@ export const TRANSPORT_PREFERENCE = {
 }
 
 /**
+ * The keyboard transports to try, excluding one already known to be inert.
+ *
+ * `virtualkbd` reports success for every keystroke whether or not anything arrives, so it cannot be allowed
+ * to absorb a request on a machine where the HID stack is not acting on its reports: the caller would believe
+ * the text had been typed. Once the pointer canary in {@link verifyVirtualHidInput} has come back negative,
+ * the virtual keyboard is dropped from the list and the next transport is used instead.
+ *
+ * With no verdict yet the preference is returned unchanged, so nothing is skipped on a machine where the
+ * devices do work.
+ *
+ * @param {string} [requested] - a transport the caller insisted on, if any.
+ * @returns {string[]} transports in the order to try.
+ */
+function keyboardOrder(requested) {
+  const known = virtualHidVerdict !== null && !virtualHidVerdict.works
+
+  // Asked for by name and known to be inert: going ahead would report success for keystrokes that never
+  // arrive, which is the exact failure this function exists to prevent. Say so instead.
+  if (known && requested === 'virtualkbd') {
+    throw new AutomationError(
+      `虚拟键盘被显式指定，但已验证它不产生输入：${virtualHidVerdict.reason}`,
+    )
+  }
+
+  const order = requested ? [requested] : TRANSPORT_PREFERENCE.keyboard
+  return known ? order.filter((transport) => transport !== 'virtualkbd') : order
+}
+
+/**
  * Run one action through the Interception driver.
  * @param {string} action - `probe`, `move`, `click`, or `point`.
  * @param {object} [params] - `{ X, Y, Button, Count }`.
@@ -217,20 +246,96 @@ export async function virtualKeyboardInput(action, params = {}, options = {}) {
 }
 
 /**
+ * Can the virtual HID devices actually produce input?
+ *
+ * Opening a device and sending it a report is not the same as the system acting on that report. A device can
+ * be present, started, correctly bound and accepting reports while something above the HID layer declines to
+ * act on them — which is the state this machine was left in, and it made every call succeed and nothing
+ * happen.
+ *
+ * The pointer can be checked and a keystroke cannot, but both come from the same driver and the same
+ * framework, so the pointer is used as the canary: if it provably does not move, the keyboard's reports are
+ * not being acted on either.
+ *
+ * The check moves the pointer a little and puts it back. That is a visible twitch, so it is only done when a
+ * caller asks for it (`video_env probe`) and the verdict is remembered for the process. Nothing else calls it
+ * as a side effect.
+ *
+ * @returns {Promise<{works: boolean, reason: string|null}>} the verdict.
+ */
+export async function verifyVirtualHidInput() {
+  if (virtualHidVerdict !== null) {
+    return virtualHidVerdict
+  }
+
+  try {
+    const origin = await desktop('cursor')
+    if (typeof origin?.x !== 'number' || typeof origin?.y !== 'number') {
+      virtualHidVerdict = { works: false, reason: 'could not read the pointer position' }
+      return virtualHidVerdict
+    }
+
+    // A displacement large enough to be unambiguous, but small enough to be a twitch.
+    const screen = await desktop('screen').catch(() => null)
+    const extentX = screen?.virtualWidth ?? screen?.width ?? 1200
+    const extentY = screen?.virtualHeight ?? screen?.height ?? 1000
+    const stepX = Math.max(40, Math.round(extentX * 0.06))
+    const stepY = Math.max(40, Math.round(extentY * 0.06))
+    const targetX = origin.x + stepX < extentX - 20 ? origin.x + stepX : origin.x - stepX
+    const targetY = origin.y + stepY < extentY - 20 ? origin.y + stepY : origin.y - stepY
+
+    await virtualMouseInput('move', { x: targetX, y: targetY })
+    const moved = await desktop('cursor')
+    const arrived = Math.abs(moved.x - targetX) <= 3 && Math.abs(moved.y - targetY) <= 3
+
+    // Put it back regardless, so a caller's view of the desktop is unchanged.
+    try {
+      await virtualMouseInput('move', { x: origin.x, y: origin.y })
+    } catch {
+      // The pointer is where it is; the verdict below is what matters.
+    }
+
+    virtualHidVerdict = arrived
+      ? { works: true, reason: null }
+      : {
+          works: false,
+          reason:
+            `指针未移动（请求 ${targetX},${targetY}，停在 ${moved.x},${moved.y}）。` +
+            '设备存在并接受报告，但系统未对其作出反应，键盘大概率同样如此。',
+        }
+    return virtualHidVerdict
+  } catch (error) {
+    virtualHidVerdict = { works: false, reason: error instanceof Error ? error.message : String(error) }
+    return virtualHidVerdict
+  }
+}
+
+/** Cached verdict from {@link verifyVirtualHidInput}; null until something asks for it. */
+let virtualHidVerdict = null
+
+/**
  * Is the virtual keyboard usable right now?
  *
- * The client reports whether it can find and open the device, which is the question that matters: the
- * driver may be installed and still not have started, and only the device interface tells them apart.
+ * The client reports whether it can find and open the device, which the driver may do while not having
+ * started — but that is only half the question, and the half that is easy to answer. A keyboard that accepts
+ * its reports and types nothing is worse than an absent one, because the caller has no reason to fall back.
+ *
+ * When the pointer canary has been run and came back negative, this reports unavailable so that callers fall
+ * through to a transport that works.
  *
  * @returns {Promise<{available: boolean, reason: string|null}>} availability.
  */
 export async function virtualKeyboardAvailable() {
   try {
     await virtualKeyboardInput('probe')
-    return { available: true, reason: null }
   } catch (error) {
     return { available: false, reason: error instanceof Error ? error.message : String(error) }
   }
+
+  if (virtualHidVerdict !== null && !virtualHidVerdict.works) {
+    return { available: false, reason: virtualHidVerdict.reason }
+  }
+  return { available: true, reason: null }
 }
 /**
  * Send pointer input through the virtual HID mouse.
@@ -313,9 +418,12 @@ export async function virtualMouseInput(action, params = {}, options = {}) {
 /**
  * Is the virtual mouse usable right now?
  *
- * The client reports whether it can open the mouse device, which is the question that matters: the driver
- * can be installed and the node present while the interface is not created, and only opening it tells the
- * two apart.
+ * The client reports whether it can open the mouse device — the driver can be installed and the node present
+ * while the interface is not created, and only opening it tells the two apart.
+ *
+ * That is not the whole question, though. A device can be openable and accepting reports while the system
+ * declines to act on them, which is indistinguishable from success at this level. When the pointer canary
+ * has been run, its verdict is folded in so the answer means "it works" rather than "it answered".
  *
  * @returns {Promise<{available: boolean, reason: string|null}>} availability.
  */
@@ -323,8 +431,14 @@ export async function virtualMouseAvailable() {
   try {
     const result = await virtualMouseInput('probe')
     // The probe reports both devices; the mouse is available only if it says so.
-    const available = typeof result.detail === 'string' && /mouse=yes/.test(result.detail)
-    return { available, reason: available ? null : 'the client did not report a mouse device' }
+    const openable = typeof result.detail === 'string' && /mouse=yes/.test(result.detail)
+    if (!openable) {
+      return { available: false, reason: 'the client did not report a mouse device' }
+    }
+    if (virtualHidVerdict !== null && !virtualHidVerdict.works) {
+      return { available: false, reason: virtualHidVerdict.reason }
+    }
+    return { available: true, reason: null }
   } catch (error) {
     return { available: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -889,7 +1003,7 @@ export async function clickText(needle, options = {}) {
  * @returns {Promise<object>} the helper's report, with the transport that ran.
  */
 export async function typeText(text, options = {}) {
-  const order = options.transport ? [options.transport] : TRANSPORT_PREFERENCE.keyboard
+  const order = keyboardOrder(options.transport)
   const failures = []
 
   for (const transport of order) {
@@ -929,7 +1043,7 @@ export async function typeText(text, options = {}) {
  * @returns {Promise<object>} the helper's report, with the transport that ran.
  */
 export async function sendKey(chord, options = {}) {
-  const order = options.transport ? [options.transport] : TRANSPORT_PREFERENCE.keyboard
+  const order = keyboardOrder(options.transport)
   const failures = []
 
   // The SendKeys grammar is what SendInput understands; the device transports want a key name. The

@@ -21,6 +21,7 @@ import {
   INPUT_TRANSPORTS,
   TRANSPORT_PREFERENCE,
   driverAvailable,
+  verifyVirtualHidInput,
   virtualKeyboardAvailable,
   virtualMouseAvailable,
 } from '../core/automation.mjs'
@@ -105,9 +106,20 @@ export function createEnvActions(config, logger) {
        * Each is probed rather than assumed — the files being present says nothing about whether the driver
        * actually started.
        */
+      // The devices are verified, not merely opened: a virtual HID device can be present, bound and accepting
+      // reports while the system declines to act on them, so "the client could open it" is not an answer. The
+      // pointer is the canary because it can be checked and a keystroke cannot; the check moves it a little
+      // and puts it back.
+      const virtualHid = await verifyVirtualHidInput()
       const virtualKeyboard = await virtualKeyboardAvailable()
       const virtualMouse = await virtualMouseAvailable()
       const filter = await driverAvailable()
+      report.virtualHidVerified = {
+        works: virtualHid.works,
+        detail: virtualHid.works
+          ? '虚拟 HID 设备已实际验证：指针按要求移动到位。'
+          : `虚拟 HID 设备存在并接受报告，但系统未对其作出反应，因此判定为不可用：${virtualHid.reason}`,
+      }
       report.input = {
         transports: INPUT_TRANSPORTS,
         preference: TRANSPORT_PREFERENCE,
@@ -119,7 +131,9 @@ export function createEnvActions(config, logger) {
         virtualMouse: {
           available: virtualMouse.available,
           reason: virtualMouse.reason,
-          note: '自研 VHF 虚拟 HID 鼠标；绝对定位，实测误差不超过 1 像素，左右键与滚轮均可用。',
+          note:
+            '自研 VHF 虚拟 HID 鼠标；绝对定位，实测误差不超过 1 像素，左右键与滚轮均可用。' +
+            '「可用」是经实际移动指针验证的结论，不是仅凭能否打开设备得出的。',
         },
         filterDriver: {
           available: filter.available,
