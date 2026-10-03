@@ -94,6 +94,7 @@ EVT_WDF_DRIVER_DEVICE_ADD VhfKeyEvtDeviceAdd;
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL VhfKeyEvtIoDeviceControl;
 EVT_WDF_DEVICE_CONTEXT_CLEANUP VhfKeyEvtDeviceContextCleanup;
 EVT_VHF_READY_FOR_NEXT_READ_REPORT VhfKeyEvtReadyForNextRead;
+EVT_VHF_CLEANUP VhfKeyEvtVhfCleanup;
 
 /*
  * Hand the waiting report to the framework, if there is one and the framework wants it.
@@ -107,13 +108,18 @@ VhfKeyTrySubmit(_In_ PVHFKEY_CONTEXT Context)
 {
     UCHAR report[VHFKEY_REPORT_SIZE];
     BOOLEAN submit = FALSE;
+    VHFHANDLE handle;
     HID_XFER_PACKET packet;
 
     WdfWaitLockAcquire(Context->ReportLock, NULL);
-    if (Context->HasPendingReport && Context->VhfReadyForReport) {
+    // The handle is tested under the lock because the cleanup callback clears it: between a report
+    // arriving and this call, the device can be removed, and submitting to a null handle is an access
+    // violation inside a kernel path — the same class of failure the /DLL bug produced.
+    if (Context->HasPendingReport && Context->VhfReadyForReport && Context->VhfHandle != NULL) {
         RtlCopyMemory(report, Context->PendingReport, VHFKEY_REPORT_SIZE);
         Context->HasPendingReport = FALSE;
         Context->VhfReadyForReport = FALSE;
+        handle = Context->VhfHandle;
         submit = TRUE;
     }
     WdfWaitLockRelease(Context->ReportLock);
@@ -125,7 +131,7 @@ VhfKeyTrySubmit(_In_ PVHFKEY_CONTEXT Context)
     packet.reportBuffer = report;
     packet.reportBufferLen = VHFKEY_REPORT_SIZE;
     packet.reportId = 0;
-    (VOID)VhfReadReportSubmit(Context->VhfHandle, &packet);
+    (VOID)VhfReadReportSubmit(handle, &packet);
 }
 
 /*
@@ -208,6 +214,23 @@ VhfKeyEvtDeviceContextCleanup(_In_ WDFOBJECT DeviceObject)
     }
 }
 
+/*
+ * VHF has finished with the handle and will not call back again.
+ *
+ * The documentation requires this callback when the driver allocated resources for the virtual device,
+ * which this one did: the context holds the lock, the queued report and the handle itself. Without it
+ * there is nothing to tell the driver that the framework has stopped referencing the client context, so
+ * a callback already in flight could arrive after the context has been freed.
+ */
+static VOID
+VhfKeyEvtVhfCleanup(_In_ PVOID VhfClientContext)
+{
+    PVHFKEY_CONTEXT context = (PVHFKEY_CONTEXT)VhfClientContext;
+    context->VhfHandle = NULL;
+    context->VhfReadyForReport = FALSE;
+    context->HasPendingReport = FALSE;
+}
+
 static NTSTATUS
 VhfKeyEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 {
@@ -271,6 +294,9 @@ VhfKeyEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
     vhfConfig.ProductID = 0x5678;
     vhfConfig.VersionNumber = 1;
     vhfConfig.EvtVhfReadyForNextReadReport = VhfKeyEvtReadyForNextRead;
+    // Required because this driver holds resources for the virtual device: the framework calls it once
+    // it has stopped using the client context, which is the only safe point to drop the handle.
+    vhfConfig.EvtVhfCleanup = VhfKeyEvtVhfCleanup;
 
     status = VhfCreate(&vhfConfig, &context->VhfHandle);
     if (!NT_SUCCESS(status)) {

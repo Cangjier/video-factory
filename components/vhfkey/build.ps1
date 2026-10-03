@@ -1,4 +1,4 @@
-﻿# Build the virtual HID keyboard: the kernel driver and its user-mode client.
+# Build the virtual HID keyboard: the kernel driver and its user-mode client.
 #
 # Sources of the toolchain, each from where it actually lives rather than from a Visual Studio install:
 #   compiler and linker   C:\BuildTools (VS Build Tools, installed separately)
@@ -144,7 +144,11 @@ $defines = @(
 )
 
 $commonArgs = @(
-  '/nologo', '/c', '/GS-', '/Gz', '/W3', '/WX-', '/Zi', '/Zc:wchar_t-',
+  # /utf-8 states that the sources are UTF-8. Without it the compiler reads them in the system code
+  # page — 936 on this machine — and warns C4819 that the file contains characters it cannot represent.
+  # The comments are in Chinese, so the warning fires on every build; more importantly, a byte sequence
+  # that decodes differently in the two encodings could silently change what a comment or string says.
+  '/nologo', '/c', '/GS-', '/Gz', '/W3', '/WX-', '/Zi', '/utf-8', '/Zc:wchar_t-',
   '/Zc:inline', '/Zc:strictStrings', '/Zc:threadSafeInit-',
   '/Oy-', '/Gy', '/Gw', '/Zp8'
 )
@@ -272,8 +276,10 @@ if (-not $DriverOnly) {
   $clientObj = Join-Path $build 'client'
   New-Item -ItemType Directory -Force -Path $clientObj | Out-Null
 
+  # /utf-8 for the same reason as the driver: the client includes vhfkey.h, whose comments are in
+  # Chinese, so without it the same C4819 warning appears on every build.
   $clientArgs = @(
-    '/nologo', '/c', '/W3', '/WX-', '/Zi', '/MD',
+    '/nologo', '/c', '/W3', '/WX-', '/Zi', '/MD', '/utf-8',
     "/I$($sdkInclude)\um", "/I$($sdkInclude)\shared", "/I$($sdkInclude)\ucrt",
     "/I$clientSrc", "/I$driverSrc",
     "/I$vcInclude",
