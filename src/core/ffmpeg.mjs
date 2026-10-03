@@ -94,16 +94,23 @@ export function resetToolCache() {
  * @param {number} [options.timeoutMs] - kill after this long. Defaults to 30 minutes.
  * @param {object} [options.config] - normalized plugin config for binary resolution.
  * @param {(chunk: string) => void} [options.onStderr] - progress callback, called per line.
- * @param {'utf8'|'binary'} [options.stdoutEncoding] - how to decode standard output.
- *   Use `binary` when the output is raw media bytes, such as the `rawvideo` used for
- *   perceptual hashing; a utf8 decode would mangle every byte above 0x7f.
- * @returns {Promise<{code: number, stderr: string, stdout: string}>} the outcome.
+ * @param {'utf8'|'buffer'} [options.stdoutEncoding] - how to collect standard output.
+ *   Use `buffer` when the output is raw media bytes, such as the `rawvideo` grayscale
+ *   proxy the frame sampler decodes: string concatenation would coerce every byte above
+ *   0x7f through a utf8 decode and destroy the data.
+ * @param {number} [options.maxStdoutBytes] - stop the process once this much standard
+ *   output has been collected. Only meaningful with `stdoutEncoding: 'buffer'`, and the
+ *   guard that keeps an unbounded stream from exhausting memory.
+ * @returns {Promise<{code: number, stderr: string, stdout: string|Buffer}>} the outcome;
+ *   `stdout` is a Buffer exactly when `stdoutEncoding` is `buffer`.
  * @throws {FFmpegNotFound} when the binary is missing.
  * @throws {FFmpegError} when the process fails, is killed, or times out.
  */
 export function run(options) {
   const { tool = 'ffmpeg', args, cwd, config = {}, onStderr } = options
   const stdoutEncoding = options.stdoutEncoding ?? 'utf8'
+  const wantBuffer = stdoutEncoding === 'buffer'
+  const maxStdoutBytes = options.maxStdoutBytes ?? Number.POSITIVE_INFINITY
   const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000
   const binary = resolveTool(tool, config)
 
@@ -119,8 +126,12 @@ export function run(options) {
     const child = spawn(binary, argv, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let stderr = ''
     let stdout = ''
+    /** @type {Buffer[]} */
+    const stdoutChunks = []
+    let stdoutBytes = 0
     let settled = false
     let timedOut = false
+    let overflowed = false
 
     const timer = setTimeout(() => {
       timedOut = true
@@ -134,10 +145,23 @@ export function run(options) {
       if (error !== undefined) reject(error)
     }
 
-    child.stdout.setEncoding(stdoutEncoding)
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk
-    })
+    if (wantBuffer) {
+      child.stdout.on('data', (chunk) => {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        stdoutBytes += buffer.length
+        if (stdoutBytes > maxStdoutBytes) {
+          overflowed = true
+          child.kill('SIGKILL')
+          return
+        }
+        stdoutChunks.push(buffer)
+      })
+    } else {
+      child.stdout.setEncoding(stdoutEncoding)
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk
+      })
+    }
 
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk) => {
@@ -160,12 +184,23 @@ export function run(options) {
         finish(new FFmpegError(args, code, stderr, `${tool} 超过 ${Math.round(timeoutMs / 1000)} 秒被终止`))
         return
       }
+      if (overflowed) {
+        finish(
+          new FFmpegError(
+            args,
+            code,
+            stderr,
+            `${tool} 的标准输出超过 ${maxStdoutBytes} 字节上限，已终止（防止无界流耗尽内存）`,
+          ),
+        )
+        return
+      }
       if (code !== 0) {
         finish(new FFmpegError(args, code, stderr))
         return
       }
       finish()
-      resolve({ code, stderr, stdout })
+      resolve({ code, stderr, stdout: wantBuffer ? Buffer.concat(stdoutChunks, stdoutBytes) : stdout })
     })
   })
 }
