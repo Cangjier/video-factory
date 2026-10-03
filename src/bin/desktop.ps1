@@ -35,6 +35,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Force UTF-8 on the way out. PowerShell 5.1 writes stdout using the console code page, so window
+# titles and any other Chinese text reach a Node parent as mojibake. JSON still parses in that
+# state, which makes the damage quiet: a window lookup by title simply never matches.
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
 $signature = @'
 using System;
 using System.Runtime.InteropServices;

@@ -78,8 +78,9 @@ export async function driverInput(action, params = {}, options = {}) {
       maxBuffer: 8 * 1024 * 1024,
       timeout: options.timeoutMs ?? 30_000,
       windowsHide: true,
+      encoding: 'buffer',
     })
-    const text = stdout.trim()
+    const text = decodePowerShell(stdout)
     if (text === '') throw new AutomationError(`驱动动作 ${action} 没有返回内容`)
     const parsed = JSON.parse(text)
     if (parsed.ok !== true) {
@@ -248,8 +249,9 @@ export async function desktop(action, params = {}, options = {}) {
       maxBuffer: 32 * 1024 * 1024,
       timeout: options.timeoutMs ?? 60_000,
       windowsHide: true,
+      encoding: 'buffer',
     })
-    const text = stdout.trim()
+    const text = decodePowerShell(stdout)
     if (text === '') throw new AutomationError(`桌面动作 ${action} 没有返回任何内容`)
     try {
       return JSON.parse(text)
@@ -262,6 +264,22 @@ export async function desktop(action, params = {}, options = {}) {
     const detail = String(error?.stderr ?? error?.message ?? error).trim()
     throw new AutomationError(`桌面动作 ${action} 失败：${detail.slice(0, 400)}`)
   }
+}
+
+/**
+ * Decode a helper's stdout as UTF-8 and strip a byte-order mark.
+ *
+ * Every helper sets [Console]::OutputEncoding to UTF-8, but decoding here is still explicit
+ * because the failure is silent and expensive: without it, Chinese read from the screen arrives as
+ * replacement characters, JSON still parses, and every text lookup simply finds nothing. That
+ * exact bug cost several rounds before it was traced.
+ *
+ * @param {Buffer|string} stdout - the captured output, ideally as a Buffer.
+ * @returns {string} the decoded text, trimmed.
+ */
+function decodePowerShell(stdout) {
+  const text = Buffer.isBuffer(stdout) ? stdout.toString('utf8') : String(stdout)
+  return text.replace(/^\uFEFF/, '').trim()
 }
 
 /**
