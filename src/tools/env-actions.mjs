@@ -98,10 +98,10 @@ export function createEnvActions(config, logger) {
        * Input transports, reported because they decide whether this machine can drive a browser or an
        * application at all, and because the answer differs from machine to machine.
        *
-       * `virtualkbd` is a real HID device created by our own driver, and it is the one to prefer: being a
-       * device, nothing above the HID layer can treat its input as synthetic. `driver` is the Interception
-       * filter, which is present here but whose keyboard path silently delivers nothing on this virtual
-       * machine. `sendinput` always works and needs no installation.
+       * `virtualkbd` and `virtualmouse` are real HID devices created by our own driver, and they are the ones
+       * to prefer: being devices, nothing above the HID layer can treat their input as synthetic. `driver` is
+       * the Interception filter, which is only reachable while that filter is installed — on this machine it
+       * is not. `sendinput` always works and needs no installation.
        *
        * Each is probed rather than assumed — the files being present says nothing about whether the driver
        * actually started.
@@ -138,7 +138,9 @@ export function createEnvActions(config, logger) {
         filterDriver: {
           available: filter.available,
           reason: filter.reason,
-          note: 'Interception 过滤驱动。本机鼠标可用，键盘路径静默无效（虚拟机的模拟 PS/2 键盘）。',
+          note:
+            'Interception 过滤驱动，需单独安装才能使用。此前装好时鼠标路径可用、键盘路径接受了按键却一个都不到达；' +
+            '原因未查明——曾归因于虚拟机模拟的 PS/2 键盘，但没有找到任何一手依据。',
         },
         sendInput: { available: true, note: 'Win32 SendInput；无需安装，始终可用。' },
       }
@@ -149,8 +151,9 @@ export function createEnvActions(config, logger) {
         ].filter(Boolean).join('与')
         report.notes = [
           ...(report.notes ?? []),
-          `虚拟 HID ${missing}不可用。输入将回退到 Interception 或 SendInput。` +
-            '安装方式：先运行 components/vhfkey/build.ps1，再运行 components/vhfkey/install-run.ps1。',
+          `虚拟 HID ${missing}不可用。输入将回退到 SendInput（若另行装了 Interception，也可能回退到它）。` +
+            '安装方式：先运行 components/vhfkey/build.ps1，再运行 components/vhfkey/clean-install.ps1——' +
+            'clean-install 先删驱动包，否则旧设备节点删不掉，每装一次就多累积两个。',
         ]
       }
 

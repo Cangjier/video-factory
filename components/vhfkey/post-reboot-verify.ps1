@@ -146,12 +146,14 @@ Save
 
 # --- verdict and report --------------------------------------------------------------------------
 $text = $lines -join "`n"
-$kbOk = $text -match 'sent:\s+"VirtualKeyboard Works 12345"' -and $text -match 'received: "VirtualKeyboard Works 12345"'
+# The keyboard check reads the verdict line the verifier prints. It used to match a quoted string instead, and
+# that string was the one the verifier compared wrongly, so the check inherited the bug: it could never pass.
+$kbOk = $text -match 'keyboard verdict:\s+WORKING'
 $msOk = $text -match 'all positions accurate' -and $text -match 'left button: received'
 $mouseWorks = $text -match 'HID-compliant mouse'
 
 Say '=== verdict ==='
-Say ("  keyboard: {0}" -f $(if ($kbOk) { 'WORKING' } elseif ($text -match 'result:\s+DIFFERENT') { 'no input' } else { 'unknown' }))
+Say ("  keyboard: {0}" -f $(if ($kbOk) { 'WORKING' } elseif ($text -match 'keyboard verdict:\s+DIFFERENT') { 'no input' } else { 'unknown' }))
 Say ("  mouse:    {0}" -f $(if ($msOk) { 'WORKING' } else { 'no input confirmed' }))
 Save
 

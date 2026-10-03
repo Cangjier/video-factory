@@ -55,12 +55,11 @@ Say '  all checks pass'
 if ($VerifyOnly) { exit 0 }
 
 Say ''
-Say '=== 2. remove any existing device and driver package ==='
-$devices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -like 'ROOT\HIDCLASS*' -and $_.FriendlyName -like '*Virtual HID*' })
-foreach ($d in $devices) {
-  Say "  removing device $($d.InstanceId)"
-  Say ((& pnputil /remove-device $d.InstanceId 2>&1) -join "`n")
-}
+Say '=== 2. remove any existing driver package, then the devices ==='
+# The package goes first, and the order is the whole point. Uninstalling the package is what releases the
+# device nodes: while it is installed they refuse to be removed, because the service still holds them.
+# Removing the devices first, which this script used to do, therefore failed every time and left the old nodes
+# behind - so each install added two more, and the machine accumulated four before anyone noticed.
 $enum = & pnputil /enum-drivers 2>&1 | Out-String
 foreach ($block in ($enum -split "(?m)^\s*$" | Where-Object { $_ -match 'vhfkey|vhfhid' })) {
   $name = ([regex]::Match($block, 'Published Name:\s*(\S+)')).Groups[1].Value
@@ -69,6 +68,22 @@ foreach ($block in ($enum -split "(?m)^\s*$" | Where-Object { $_ -match 'vhfkey|
     Say ((& pnputil /delete-driver $name /uninstall /force 2>&1) -join "`n")
   }
 }
+Start-Sleep -Seconds 2
+
+# Now the nodes, including the virtual HID children a stale node leaves behind. Those orphans matter: the
+# client opens the first interface it finds, so it can end up talking to one whose reports go nowhere, and the
+# symptom is a device that reports OK and does nothing.
+$devices = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+  ($_.InstanceId -like 'ROOT\HIDCLASS*' -and $_.FriendlyName -like '*Virtual HID*') -or
+  $_.InstanceId -like 'VHF\*' -or
+  $_.InstanceId -like 'HID\*VHF*' -or
+  $_.InstanceId -like 'HID\VID_1234*'
+})
+foreach ($d in $devices) {
+  Say "  removing device $($d.InstanceId)"
+  Say ((& pnputil /remove-device $d.InstanceId 2>&1) -join "`n")
+}
+Start-Sleep -Seconds 2
 
 $leftovers = @(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' -or $_.Name -like 'vhfhid*' })
 if ($leftovers.Count -gt 0) {
@@ -76,6 +91,21 @@ if ($leftovers.Count -gt 0) {
   foreach ($l in $leftovers) { Remove-Item $l.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Say "  store is clean: $((@(Get-ChildItem 'C:\Windows\System32\DriverStore\FileRepository' -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'vhfkey*' -or $_.Name -like 'vhfhid*' })).Count -eq 0)"
+
+# Refuse rather than install on top of a node that would not go away. A stale node and a fresh one are
+# indistinguishable to the client, so installing anyway is how a device that reports OK and does nothing gets
+# created in the first place.
+$left = @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+  $_.FriendlyName -like '*Virtual HID*' -or $_.InstanceId -like 'VHF\*'
+})
+if ($left.Count -gt 0) {
+  Say ''
+  Say "  REFUSING TO INSTALL: $($left.Count) node(s) are still present after the package was deleted."
+  foreach ($d in $left) { Say "    $($d.InstanceId)  [$($d.Status)]" }
+  Say '  Remove them (or reboot) and run clean-install.ps1 again.'
+  exit 7
+}
+Say '  no device node left behind'
 
 # The binary the INF installs is the one in the driver directory, which is not where the build writes its
 # output. A mismatch there has already sent a stale, crashing binary to the driver store twice, so the two

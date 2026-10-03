@@ -56,27 +56,31 @@ export const VIRTUAL_HID_CLIENT = resolve(PLUGIN_ROOT, 'components', 'vhfkey', '
 /**
  * The input transports available.
  *
- * `sendinput`   injects at user level through the Win32 input API.
- * `driver`      sends through the Interception filter driver, which sits below that boundary. On this
- *               machine it works for the pointer and for nothing else: its keyboard path accepts
- *               keystrokes and they never arrive, because the filter did not attach to the emulated PS/2
- *               keyboard of this virtual machine.
- * `virtualkbd`  submits HID reports to a virtual keyboard device created by our own driver. Verified by
- *               typing into Notepad and reading the document back, byte for byte.
+ * `sendinput`    injects at user level through the Win32 input API.
+ * `driver`       sends through the Interception filter driver, which sits below that boundary. It is only
+ *                reachable while that filter is installed, and on this machine it currently is not. When it
+ *                was, its pointer path worked and its keyboard path accepted every keystroke and delivered
+ *                none. The cause of that was never established: the attractively simple explanation, that the
+ *                filter did not attach to the emulated PS/2 keyboard of this virtual machine, is supported by
+ *                no source that could be found, so it is not repeated here as though it were known.
+ * `virtualkbd`   submits HID reports to a virtual keyboard device created by our own driver. Verified by
+ *                typing into Notepad and reading the document back, byte for byte.
+ * `virtualmouse` does the same for the pointer, positioned absolutely. Verified by moving it and reading the
+ *                position back: every requested position landed within a pixel.
  */
 export const INPUT_TRANSPORTS = ['sendinput', 'driver', 'virtualkbd', 'virtualmouse']
 
 /**
  * Which transport to use for each kind of input, in order of preference, and why.
  *
- *   mouse     driver first. `move` lands exactly where it is aimed and `click` activates a control. A
- *             virtual pointer does not exist yet, so the filter driver remains the better option here;
- *             SendInput is the fallback, and it also works.
+ *   mouse     virtualmouse first. It is a real HID device, so nothing above the HID layer can treat its input
+ *             as synthetic, and its absolute positioning was measured at a pixel or better. The Interception
+ *             filter follows, for a machine where the virtual device is absent, then SendInput, which always
+ *             works.
  *
- *   keyboard  virtualkbd first. It is a genuine HID device, so it is the transport least likely to be
- *             ignored or treated as synthetic. SendInput second, because it is dependable and needs no
- *             installation. The filter driver last, because on this machine it silently does nothing:
- *             it reports every keystroke as accepted and none arrives.
+ *   keyboard  virtualkbd first, for the same reason. SendInput second, because it is dependable and needs no
+ *             installation. The filter driver last: it is the least useful of the three here, and on this
+ *             machine it is not installed at all.
  *
  * The honest history is worth keeping: an earlier conclusion that SendInput could not activate a browser
  * button was wrong, and the real fault was coordinate arithmetic. The transports are chosen for what they
@@ -152,8 +156,12 @@ export async function driverInput(action, params = {}, options = {}) {
     return parsed
   } catch (error) {
     if (error instanceof AutomationError) throw error
-    const detail = String(error?.stderr ?? error?.message ?? error).trim()
-    throw new AutomationError(`驱动动作 ${action} 失败：${detail.slice(0, 400)}`)
+    // An empty stderr is not a detail: reporting "failed:" with nothing after it is the unhelpful signal this
+    // module exists to avoid, so the process's own message and exit code are used when stderr says nothing.
+    const stderr = Buffer.isBuffer(error?.stderr) ? error.stderr.toString('utf8') : String(error?.stderr ?? '')
+    const detail = stderr.trim() || String(error?.message ?? error).trim()
+    const exit = typeof error?.code === 'number' ? ` (exit ${error.code})` : ''
+    throw new AutomationError(`驱动动作 ${action} 失败${exit}：${detail.slice(0, 400)}`)
   }
 }
 
