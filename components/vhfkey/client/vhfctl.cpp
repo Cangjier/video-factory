@@ -162,11 +162,18 @@ static const KeyEntry *FindKey(const char *name)
 }
 
 /*
- * Find a device by interface GUID.
+ * Find a device node that has a working device behind it.
  *
- * The path is not stable across enumerations, so it is looked up every run rather than cached anywhere.
+ * More than one interface can match. A node left behind by an earlier install still enumerates and still
+ * accepts IOCTLs, but its virtual HID device is gone, so reports into it are discarded and every call still
+ * succeeds. Choosing by index cannot tell the two apart, which is why the first version of this client
+ * silently talked to a dead node.
+ *
+ * The driver refuses a report when its device is gone, so each interface is opened and sent a report that
+ * cannot disturb anything: for the keyboard, every key released; for the mouse, the pointer where it already
+ * is with no button held. The first interface that accepts it is the live one.
  */
-static HANDLE OpenDevice(const GUID *guid)
+static HANDLE OpenDevice(const GUID *guid, DWORD ioctl, const unsigned char *probe, DWORD probeLength)
 {
     HDEVINFO info = SetupDiGetClassDevs(guid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (info == INVALID_HANDLE_VALUE) {
@@ -189,10 +196,20 @@ static HANDLE OpenDevice(const GUID *guid)
         }
         detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
         if (SetupDiGetDeviceInterfaceDetail(info, &interfaceData, detail, needed, NULL, NULL)) {
-            device = CreateFile(detail->DevicePath,
-                                GENERIC_WRITE | GENERIC_READ,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                NULL, OPEN_EXISTING, 0, NULL);
+            HANDLE candidate = CreateFile(detail->DevicePath,
+                                          GENERIC_WRITE | GENERIC_READ,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                          NULL, OPEN_EXISTING, 0, NULL);
+            if (candidate != INVALID_HANDLE_VALUE) {
+                DWORD written = 0;
+                if (DeviceIoControl(candidate, ioctl, (LPVOID)probe, probeLength, NULL, 0, &written, NULL)) {
+                    device = candidate;
+                } else {
+                    // A node whose device is gone. Skip it and keep looking, rather than failing outright: the
+                    // live node is often a later entry.
+                    CloseHandle(candidate);
+                }
+            }
         }
         free(detail);
         if (device != INVALID_HANDLE_VALUE) {
@@ -202,6 +219,28 @@ static HANDLE OpenDevice(const GUID *guid)
 
     SetupDiDestroyDeviceInfoList(info);
     return device;
+}
+
+/** The report that asks "is there a device here?" without changing anything. */
+static void BuildKeyboardProbe(unsigned char *report)
+{
+    memset(report, 0, VHFKEY_REPORT_SIZE);   // no modifier, no key held
+}
+
+static void BuildMouseProbe(unsigned char *report)
+{
+    POINT current;
+    if (!GetCursorPos(&current)) {
+        current.x = 0;
+        current.y = 0;
+    }
+    memset(report, 0, VHFMOUSE_REPORT_SIZE);
+    unsigned short x = AbsX(current.x);
+    unsigned short y = AbsY(current.y);
+    report[VHFMOUSE_X_INDEX] = (unsigned char)(x & 0xFF);
+    report[VHFMOUSE_X_INDEX + 1] = (unsigned char)((x >> 8) & 0xFF);
+    report[VHFMOUSE_Y_INDEX] = (unsigned char)(y & 0xFF);
+    report[VHFMOUSE_Y_INDEX + 1] = (unsigned char)((y >> 8) & 0xFF);
 }
 
 /* --------------------------------------------------------------------------------------------- */
@@ -398,7 +437,10 @@ int main(int argc, char **argv)
 
     // --- keyboard ---------------------------------------------------------------------------
     if (_stricmp(action, "type") == 0 || _stricmp(action, "key") == 0 || _stricmp(action, "combo") == 0) {
-        HANDLE device = OpenDevice(&GUID_DEVINTERFACE_VHFKEY);
+        unsigned char keyboardProbe[VHFKEY_REPORT_SIZE];
+        BuildKeyboardProbe(keyboardProbe);
+        HANDLE device = OpenDevice(&GUID_DEVINTERFACE_VHFKEY, IOCTL_VHFKEY_SEND_REPORT,
+                                   keyboardProbe, sizeof(keyboardProbe));
         if (device == INVALID_HANDLE_VALUE) {
             fprintf(stderr, "virtual keyboard device not found (is the driver installed and started?)\n");
             return 2;
@@ -447,10 +489,16 @@ int main(int argc, char **argv)
     int result = 0;
 
     if (_stricmp(action, "probe") == 0) {
-        HANDLE keyboard = OpenDevice(&GUID_DEVINTERFACE_VHFKEY);
+        unsigned char keyboardProbe[VHFKEY_REPORT_SIZE];
+        BuildKeyboardProbe(keyboardProbe);
+        HANDLE keyboard = OpenDevice(&GUID_DEVINTERFACE_VHFKEY, IOCTL_VHFKEY_SEND_REPORT,
+                                     keyboardProbe, sizeof(keyboardProbe));
         bool hasKeyboard = keyboard != INVALID_HANDLE_VALUE;
         if (hasKeyboard) CloseHandle(keyboard);
-        mouse = OpenDevice(&GUID_DEVINTERFACE_VHFMOUSE);
+        unsigned char mouseProbe[VHFMOUSE_REPORT_SIZE];
+        BuildMouseProbe(mouseProbe);
+        mouse = OpenDevice(&GUID_DEVINTERFACE_VHFMOUSE, IOCTL_VHFMOUSE_SEND_REPORT,
+                           mouseProbe, sizeof(mouseProbe));
         bool hasMouse = mouse != INVALID_HANDLE_VALUE;
         if (hasMouse) CloseHandle(mouse);
         if (!hasKeyboard && !hasMouse) {
@@ -461,7 +509,10 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    mouse = OpenDevice(&GUID_DEVINTERFACE_VHFMOUSE);
+    unsigned char mouseProbe[VHFMOUSE_REPORT_SIZE];
+    BuildMouseProbe(mouseProbe);
+    mouse = OpenDevice(&GUID_DEVINTERFACE_VHFMOUSE, IOCTL_VHFMOUSE_SEND_REPORT,
+                       mouseProbe, sizeof(mouseProbe));
     if (mouse == INVALID_HANDLE_VALUE) {
         fprintf(stderr, "virtual mouse device not found (is the driver installed and started?)\n");
         return 2;

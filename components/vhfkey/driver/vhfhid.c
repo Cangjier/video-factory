@@ -250,6 +250,22 @@ VhfHidAcceptReport(_In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ 
         return;
     }
 
+    /*
+     * Refuse the report when there is no virtual device behind this node.
+     *
+     * A device node can outlive its virtual device. After several install and removal cycles a node can be
+     * left enumerated, still accepting IOCTLs, with the framework's child device already gone and the handle
+     * cleared by the cleanup callback. Reports into it are accepted and discarded, so every call succeeds and
+     * nothing happens — which is indistinguishable, from the caller's side, from a device that works.
+     *
+     * Returning an error here is what lets the client tell the two apart and move on to a node that does
+     * have a device behind it. Without it the client has no way to choose, because success means nothing.
+     */
+    if (Context->Virtual.VhfHandle == NULL) {
+        WdfRequestComplete(Request, STATUS_DEVICE_NOT_READY);
+        return;
+    }
+
     status = WdfRequestRetrieveInputBuffer(Request, Context->Virtual.ReportLength, &buffer, &length);
     if (!NT_SUCCESS(status)) {
         WdfRequestComplete(Request, status);
