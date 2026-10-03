@@ -200,11 +200,11 @@ $commonArgs = @(
   '/Oy-', '/Gy', '/Gw', '/Zp8'
 )
 
-Write-Output '  compiling vhfkey.c ...'
+Write-Output '  compiling vhfhid.c ...'
 $clArgs = @($commonArgs + $defines + $includeArgs + @(
   "/Fo$driverObj\\",
-  "/Fd$driverObj\vhfkey.pdb",
-  (Join-Path $driverSrc 'vhfkey.c')
+  "/Fd$driverObj\vhfhid.pdb",
+  (Join-Path $driverSrc 'vhfhid.c')
 ))
 Write-Output "    cl $($clArgs -join ' ')"
 & $cl @clArgs 2>&1 | ForEach-Object { "    $_" }
@@ -308,7 +308,7 @@ $linkArgs = @(
   '/NODEFAULTLIB:libcmt.lib',
   '/NODEFAULTLIB:msvcrt.lib',
   '/NODEFAULTLIB:libvcruntime.lib',
-  (Join-Path $driverObj 'vhfkey.obj'),
+  (Join-Path $driverObj 'vhfhid.obj'),
   'wdm.lib', 'ntoskrnl.lib', 'hal.lib', 'wmilib.lib', 'vhfkm.lib',
   'ntstrsafe.lib', 'BufferOverflowK.lib', 'libcntpr.lib',
   'wdfldr.lib', 'wdfdriverentry.lib',
@@ -463,7 +463,7 @@ if (-not $DriverOnly) {
   $clientObj = Join-Path $build 'client'
   New-Item -ItemType Directory -Force -Path $clientObj | Out-Null
 
-  # /utf-8 for the same reason as the driver: the client includes vhfkey.h, whose comments are in
+  # /utf-8 for the same reason as the driver: the client includes vhfhid.h, whose comments are in
   # Chinese, so without it the same C4819 warning appears on every build.
   $clientArgs = @(
     '/nologo', '/c', '/W3', '/WX-', '/Zi', '/MD', '/utf-8',
@@ -471,17 +471,17 @@ if (-not $DriverOnly) {
     "/I$clientSrc", "/I$driverSrc",
     "/I$vcInclude",
     "/Fo$clientObj\\",
-    "/Fd$clientObj\vhfkeyctl.pdb",
-    (Join-Path $clientSrc 'vhfkeyctl.cpp')
+    "/Fd$clientObj\vhfctl.pdb",
+    (Join-Path $clientSrc 'vhfctl.cpp')
   )
-  Write-Output '  compiling vhfkeyctl.cpp ...'
+  Write-Output '  compiling vhfctl.cpp ...'
   & $cl @clientArgs 2>&1 | ForEach-Object { "    $_" }
   if ($LASTEXITCODE -ne 0) {
     Write-Output '  client compilation failed'
     exit 1
   }
 
-  $exe = Join-Path $output 'vhfkeyctl.exe'
+  $exe = Join-Path $output 'vhfctl.exe'
   $clientLinkArgs = @(
     '/nologo', '/SUBSYSTEM:CONSOLE', '/MACHINE:X64',
     "/LIBPATH:$(Join-Path $sdkLib 'um\x64')",
@@ -489,7 +489,7 @@ if (-not $DriverOnly) {
     "/LIBPATH:$msvcLib",
     "/OUT:$exe",
     '/DEBUG',
-    (Join-Path $clientObj 'vhfkeyctl.obj'),
+    (Join-Path $clientObj 'vhfctl.obj'),
     'setupapi.lib', 'kernel32.lib', 'user32.lib', 'advapi32.lib',
     'ucrt.lib', 'vcruntime.lib', 'msvcrt.lib'
   )
