@@ -146,6 +146,7 @@ typedef struct _VHFDEVICE {
     ULONG        ReportLength;
     BOOLEAN      HasPendingReport;
     BOOLEAN      VhfReadyForReport;
+
 } VHFDEVICE, *PVHFDEVICE;
 
 typedef struct _VHFHID_CONTEXT {
@@ -163,6 +164,7 @@ EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL VhfHidEvtIoDeviceControl;
 EVT_WDF_DEVICE_CONTEXT_CLEANUP VhfHidEvtDeviceContextCleanup;
 EVT_VHF_READY_FOR_NEXT_READ_REPORT VhfHidEvtReadyForNextRead;
 EVT_VHF_CLEANUP VhfHidEvtVhfCleanup;
+
 
 static VOID
 VhfHidTrySubmit(_In_ PVHFDEVICE Device)
@@ -200,7 +202,7 @@ VhfHidTrySubmit(_In_ PVHFDEVICE Device)
     packet.reportBuffer = report;
     packet.reportBufferLen = length;
     packet.reportId = 0;
-    (VOID)VhfReadReportSubmit(handle, &packet);
+
 }
 
 static VOID
@@ -214,6 +216,7 @@ VhfHidEvtReadyForNextRead(_In_ PVOID VhfClientContext)
 
     WdfWaitLockAcquire(device->ReportLock, NULL);
     device->VhfReadyForReport = TRUE;
+
     WdfWaitLockRelease(device->ReportLock);
 
     VhfHidTrySubmit(device);
@@ -258,7 +261,9 @@ VhfHidAcceptReport(_In_ WDFREQUEST Request, _In_ size_t InputBufferLength, _In_ 
     Context->Virtual.HasPendingReport = TRUE;
     WdfWaitLockRelease(Context->Virtual.ReportLock);
 
+
     VhfHidTrySubmit(&Context->Virtual);
+
     WdfRequestComplete(Request, STATUS_SUCCESS);
 }
 
@@ -299,41 +304,66 @@ VhfHidEvtDeviceContextCleanup(_In_ WDFOBJECT DeviceObject)
 /*
  * Does this node create the mouse?
  *
- * The two nodes share one driver binary, and the installer writes an IsMouse value into each node's hardware
- * key — 1 for the mouse node, 0 for the keyboard. The driver reads that value.
+ * The node's HardwareID decides it - root\vhfhidmouse or root\vhfhidkey - and the two nodes share one driver
+ * binary, so this is the only thing that distinguishes them.
  *
- * Inferring it from HardwareID was tried first and does not work: that value is a REG_MULTI_SZ, and
- * WdfRegistryQueryString expects a REG_SZ, so the query fails and both nodes fall back to the keyboard. The
- * symptom was a mouse node reporting OK while creating a keyboard, which is invisible until something tries
- * to move the pointer.
+ * HardwareID is a REG_MULTI_SZ, so it must be read with the multi-string query. Two earlier attempts failed,
+ * both for instructive reasons:
  *
- * Anything unreadable or unrecognised means the keyboard, which is the safer default: it is the node that
- * must not be mistaken for a pointing device.
+ *   - WdfRegistryQueryString on HardwareID. That call expects a REG_SZ, so it fails on a MULTI_SZ and both
+ *     nodes fall back to the keyboard. The symptom - a mouse node that reports OK while creating a keyboard -
+ *     is invisible until something tries to move the pointer.
+ *
+ *   - An IsMouse value written by the INF's AddReg. The INF contains it and the installed copy contains it,
+ *     but it never reached the device's registry key, so that read failed for both nodes as well.
+ *
+ * HardwareID is present by construction, so it does not depend on the installer having applied a section.
+ * Anything unrecognised means the keyboard, which is the safer default: it is the node that must not be
+ * mistaken for a pointing device.
  */
+
 static BOOLEAN
 VhfHidIsMouseNode(_In_ WDFDEVICE Device)
 {
-    WDFKEY          key = NULL;
-    UNICODE_STRING  valueName;
-    ULONG           value = 0;
-    NTSTATUS        status;
-    BOOLEAN         isMouse = FALSE;
+    DEVICE_OBJECT *pdo;
+    WCHAR          buffer[512];
+    ULONG          length = sizeof(buffer);
+    NTSTATUS       status;
 
-    status = WdfDeviceOpenRegistryKey(Device, PLUGPLAY_REGKEY_DEVICE, KEY_READ,
-                                      WDF_NO_OBJECT_ATTRIBUTES, &key);
+    RtlZeroMemory(buffer, sizeof(buffer));
+
+    /*
+     * Read the hardware ID from the device object itself.
+     *
+     * Three earlier attempts failed, and each failure is worth recording because the code looked correct
+     * every time:
+     *
+     *   - WdfRegistryQueryString on the HardwareID value: that call expects a REG_SZ and HardwareID is a
+     *     REG_MULTI_SZ, so it failed and both nodes fell back to the keyboard.
+     *   - An IsMouse value written by the INF's AddReg: present in the INF and in the installed copy, but
+     *     never applied to the device's key, so that read failed too.
+     *   - WdfRegistryQueryMultiString on HardwareID through PLUGPLAY_REGKEY_DEVICE. The multi-string call is
+     *     right for the type, but the key the framework opens for that constant does not contain HardwareID:
+     *     the query returns STATUS_OBJECT_NAME_NOT_FOUND. That was established by having the driver record
+     *     the status in its service key, since no debugger is available here.
+     *
+     * IoGetDeviceProperty asks the PDO directly, so it does not depend on which registry key the framework
+     * would have opened. DevicePropertyHardwareID returns a MULTI_SZ, and the first entry is the hardware ID
+     * the node was created with: root\vhfhidmouse or root\vhfhidkey.
+     */
+    pdo = WdfDeviceWdmGetPhysicalDevice(Device);
+    if (pdo == NULL) {
+        return FALSE;
+    }
+
+    status = IoGetDeviceProperty(pdo, DevicePropertyHardwareID, sizeof(buffer), buffer, &length);
     if (!NT_SUCCESS(status)) {
         return FALSE;
     }
 
-    RtlInitUnicodeString(&valueName, L"IsMouse");
-    status = WdfRegistryQueryULong(key, &valueName, &value);
-    if (NT_SUCCESS(status) && value == 1) {
-        isMouse = TRUE;
-    }
-
-    WdfRegistryClose(key);
-    return isMouse;
+    return wcsstr(buffer, L"vhfhidmouse") != NULL;
 }
+
 static NTSTATUS
 VhfHidEvtDeviceAdd(_In_ WDFDRIVER Driver, _Inout_ PWDFDEVICE_INIT DeviceInit)
 {
