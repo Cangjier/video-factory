@@ -29,6 +29,23 @@ tmp/
 # is meaningless anywhere else.
 vendor/interception/pre-reboot-state.json
 
+# Driver build toolchain: the WDK and SDK packages are 260 MB of downloads that are
+# reproducible from their published URLs, and the extracted trees are several gigabytes of
+# Microsoft headers, libraries and tools. None of it belongs in the repository — build.ps1
+# fetches and lays it out again. The same applies to the Visual Studio Build Tools
+# bootstrapper, whose installer is downloaded on demand.
+vendor/wdk/
+vendor/vsbt/
+
+# Driver build products. The .sys is reproducible from source, and the intermediates are
+# large: the .pdb alone is 600 KB per build and the .ilk as much again.
+components/vhfkey/out/
+components/vhfkey/build/
+# The catalog and the copy of the binary that the INF needs are generated during install, so
+# the only tracked driver artifacts are the sources and the INF.
+components/vhfkey/driver/*.cat
+components/vhfkey/driver/*.sys
+
 # Render output. The demo's out/ is committed on purpose as a working reference, so it
 # is re-included below; the intermediate .work/ directory inside it is not.
 **/output/
