@@ -63,3 +63,7 @@ components/vhfkey/device-node.log
 # Crash analysis transcripts and symbol caches: large, machine-specific, regenerated on demand.
 tmp/kd-*.txt
 
+
+# Windows SDK installer: a 1.3 MB download used once to obtain the debuggers, kept locally.
+vendor/dbg/
+
