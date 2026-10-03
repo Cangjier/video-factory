@@ -1,4 +1,4 @@
-﻿# 豆包语音播客 API 契约（抓取存档）
+# 豆包语音播客 API 契约（抓取存档）
 
 > **来源**：https://docs.volcengine.com/docs/DoubaoVoice/PodcastAPI-websocket-v3protocol?lang=zh
 > **抓取方式**：该站是客户端渲染，`web_fetch` 只得到空 body。用无头 Edge 渲染后 `--dump-dom` 取完整 DOM
@@ -711,7 +711,7 @@ payload鍝嶅簲鍙傛暟
 
 - | 363
 | PodcastEnd锛岃繑鍥炰竴浜涙挱瀹㈡€荤粨鎬х殑淇℃伅锛岃〃绀烘挱瀹㈢粨鏉燂紙涓轰簡鍏煎涔嬪墠鐨勪娇鐢紝杩欎釜浜嬩欢涓嶄竴瀹氫細杩斿洖锛?
-绀轰緥锛歿'meta_info': {'audio_url': 'https://speech-tts-podcast.tos-cn-beijing.volces.com/speech-tts-podcast/tts_audio/aGjiRDfUWi/b598a76a-ebb2-4117-9270-9b3b740e1adb/podcast_demo.mp3?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=<REDACTED_AK>%2F20250825%2Fcn-beijing%2Ftos%2Frequest&X-Tos-Date=20250825T070712Z&X-Tos-Expires=3600&X-Tos-Signature=55a5e2d0bd40f91fc846068f9d35737b96e9891134aabb783b973f91b5f993c9&X-Tos-SignedHeaders=host', 'topics': null, 'input_metrics': {'origin_input_text_length': 14, 'input_text_length': 10, 'input_text_truncated': true}}}
+绀轰緥锛歿'meta_info': {'audio_url': 'https://speech-tts-podcast.tos-cn-beijing.volces.com/speech-tts-podcast/tts_audio/aGjiRDfUWi/b598a76a-ebb2-4117-9270-9b3b740e1adb/podcast_demo.mp3?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=<REDACTED_AK>%2F20250825%2Fcn-beijing%2Ftos%2Frequest&X-Tos-Date=20250825T070712Z&X-Tos-Expires=3600&X-Tos-Signature=<REDACTED_SIGNATURE>&X-Tos-SignedHeaders=host', 'topics': null, 'input_metrics': {'origin_input_text_length': 14, 'input_text_length': 10, 'input_text_truncated': true}}}
 | 鏁版嵁绫?| 涓嬭
 
 - | 152
@@ -1177,7 +1177,7 @@ PodcastEnd
 | len(response_meta_json)
 
 - | 28 ~ ...
-| {'meta_info': {'audio_url': 'https://speech-tts-podcast.tos-cn-beijing.volces.com/speech-tts-podcast/tts_audio/aGjiRDfUWi/a0979493-196a-42ad-aff1-1dfe63c7e219/podcast_demo.mp3?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=<REDACTED_AK>%2F20250825%2Fcn-beijing%2Ftos%2Frequest&X-Tos-Date=20250825T084035Z&X-Tos-Expires=3600&X-Tos-Signature=2a549ee5f5ed8a32ce34d475ccf56f50a02e78b3431eb760fb9edc3d0d15296b&X-Tos-SignedHeaders=host', 'topics': None}}
+| {'meta_info': {'audio_url': 'https://speech-tts-podcast.tos-cn-beijing.volces.com/speech-tts-podcast/tts_audio/aGjiRDfUWi/a0979493-196a-42ad-aff1-1dfe63c7e219/podcast_demo.mp3?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Credential=<REDACTED_AK>%2F20250825%2Fcn-beijing%2Ftos%2Frequest&X-Tos-Date=20250825T084035Z&X-Tos-Expires=3600&X-Tos-Signature=<REDACTED_SIGNATURE>&X-Tos-SignedHeaders=host', 'topics': None}}
 | response_meta_json
 
 娌℃湁闇€瑕佽繑鍥炵殑 meta 淇℃伅杩欎釜浜嬩欢涓嶄細鎺ㄩ€?
