@@ -37,30 +37,108 @@ const PLUGIN_ROOT = resolve(HERE, '..', '..')
 /** The PowerShell helpers that touch the OS. */
 export const DESKTOP_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'desktop.ps1')
 export const OCR_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'ocr.ps1')
+export const DRIVER_SCRIPT = resolve(PLUGIN_ROOT, 'src', 'bin', 'interception-input.ps1')
 
 /**
- * The screen offset of a window's content area, relative to the window's own origin.
+ * The input transports available for pointer actions.
  *
- * A browser reports an element's position in client coordinates, which start at the content area,
- * not at the window frame. The content area sits below the title bar and any tab strip, and to the
- * right of the window border, so client coordinates are not screen coordinates and a naive click
- * misses by exactly this offset.
+ * `sendinput` injects at user level through the Win32 input API. `driver` sends through the
+ * Interception filter driver, which sits below that boundary in the input stack.
  *
- * Measured on this machine: a window at (40,30) has its content origin at screen (51,110), an
- * offset of (11,80). The horizontal component is the border; the vertical is title bar plus tab
- * strip plus address bar.
+ * Both were measured working on this machine, including on a browser button. The driver is the
+ * more faithful transport — nothing in the stack can tell its events from a device's own — and it
+ * is the one to reach for when a target treats synthetic input as a different class of event,
+ * which is common in games and in software that reads raw device state.
+ *
+ * Note the honest history: an earlier conclusion that SendInput could not activate a browser
+ * button was wrong, and the real fault was the coordinate arithmetic above. The driver is a
+ * fallback for targets that need it, not a fix for mis-aimed clicks.
+ */
+export const INPUT_TRANSPORTS = ['sendinput', 'driver']
+
+/**
+ * Run one action through the Interception driver.
+ * @param {string} action - `probe`, `move`, `click`, or `point`.
+ * @param {object} [params] - `{ X, Y, Button, Count }`.
+ * @returns {Promise<object>} the helper's JSON report.
+ * @throws {AutomationError} when the driver is absent or the action fails.
+ */
+export async function driverInput(action, params = {}, options = {}) {
+  if (!existsSync(DRIVER_SCRIPT)) {
+    throw new AutomationError(`找不到驱动输入脚本：${DRIVER_SCRIPT}`)
+  }
+  const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', DRIVER_SCRIPT, '-Action', action]
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null) continue
+    args.push(`-${key}`, String(value))
+  }
+
+  try {
+    const { stdout } = await run('powershell.exe', args, {
+      maxBuffer: 8 * 1024 * 1024,
+      timeout: options.timeoutMs ?? 30_000,
+      windowsHide: true,
+    })
+    const text = stdout.trim()
+    if (text === '') throw new AutomationError(`驱动动作 ${action} 没有返回内容`)
+    const parsed = JSON.parse(text)
+    if (parsed.ok !== true) {
+      throw new AutomationError(
+        `驱动动作 ${action} 未成功：${parsed.reason ?? JSON.stringify(parsed)}` +
+          (parsed.hint === undefined ? '' : `（${parsed.hint}）`),
+      )
+    }
+    return parsed
+  } catch (error) {
+    if (error instanceof AutomationError) throw error
+    const detail = String(error?.stderr ?? error?.message ?? error).trim()
+    throw new AutomationError(`驱动动作 ${action} 失败：${detail.slice(0, 400)}`)
+  }
+}
+
+/**
+ * Is the driver transport usable right now?
+ *
+ * The driver is installed but only joins the input stack after a restart, so this is a question
+ * about the running system rather than about whether the files are present. It doubles as a
+ * capability probe for reporting.
+ *
+ * @returns {Promise<{available: boolean, detail: object|null, reason: string|null}>} availability.
+ */
+export async function driverAvailable() {
+  try {
+    const report = await driverInput('probe')
+    return { available: true, detail: report, reason: null }
+  } catch (error) {
+    return { available: false, detail: null, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * The offset from a window's own corner to its content area, in screen pixels.
+ *
+ * A browser reports element positions in client coordinates, which start at the content area
+ * rather than at the window frame: below the title bar, the tab strip and the address bar, and
+ * inside the window border. Client coordinates are therefore not screen coordinates.
+ *
+ * Measured on this machine for a window at (40,30): the content origin is at screen (51,110), so
+ * this offset is (11,80). Chrome height dominates the vertical part and varies with what the
+ * browser is showing — a bookmarks bar adds roughly 30 px — so treat this as a default to be
+ * measured, not a constant to be trusted. {@link measureContentOffset} derives it by clicking.
  */
 export const CONTENT_OFFSET = { x: 11, y: 80 }
 
 /**
  * Convert a client coordinate reported by a window into a screen coordinate.
  *
- * The inverse is {@link screenToClient}. Both are pure arithmetic on measured offsets, so they can
- * be unit-tested without touching the desktop.
+ * The window's position and the content offset are separate arguments because conflating them is a
+ * mistake with no visible symptom: adding the window position twice aims every click one
+ * window-origin too far down and right, the click is still delivered, and it simply lands on
+ * something else.
  *
  * @param {{x: number, y: number}} windowOrigin - the window's position on screen.
  * @param {{x: number, y: number}} client - the client coordinate.
- * @param {{x: number, y: number}} [offset] - content offset; defaults to {@link CONTENT_OFFSET}.
+ * @param {{x: number, y: number}} [offset] - content offset within the window; defaults to {@link CONTENT_OFFSET}.
  * @returns {{x: number, y: number}} the screen coordinate.
  */
 export function clientToScreen(windowOrigin, client, offset = CONTENT_OFFSET) {
@@ -74,13 +152,59 @@ export function clientToScreen(windowOrigin, client, offset = CONTENT_OFFSET) {
  * Convert a screen coordinate into the client coordinate a window would report for it.
  * @param {{x: number, y: number}} windowOrigin - the window's position on screen.
  * @param {{x: number, y: number}} screen - the screen coordinate.
- * @param {{x: number, y: number}} [offset] - content offset; defaults to {@link CONTENT_OFFSET}.
+ * @param {{x: number, y: number}} [offset] - content offset within the window; defaults to {@link CONTENT_OFFSET}.
  * @returns {{x: number, y: number}} the client coordinate.
  */
 export function screenToClient(windowOrigin, screen, offset = CONTENT_OFFSET) {
   return {
     x: Math.round(screen.x - windowOrigin.x - offset.x),
     y: Math.round(screen.y - windowOrigin.y - offset.y),
+  }
+}
+
+/**
+ * Measure a window's content offset by clicking a known client point and asking the application
+ * where the click arrived.
+ *
+ * The offset cannot be assumed, because chrome height varies; it can be measured in one click. The
+ * provisional value is used to place the click, and the difference between where it was aimed and
+ * where the application says it landed is the correction.
+ *
+ * The same click doubles as a liveness check on the whole path, so a measurement failure and a
+ * broken input path are distinguishable: no reported arrival means the click did not reach the
+ * application, which is a different problem from a wrong offset.
+ *
+ * @param {number} handle - the window to measure.
+ * @param {{x: number, y: number}} clientPoint - a point whose client coordinate is known.
+ * @param {object} options - `{ provisional, readArrival, settleMs, move, click }`.
+ * @returns {Promise<{offset: {x: number, y: number}, arrived: {x: number, y: number}, aim: {x: number, y: number}, window: object}>} the measurement.
+ * @throws {AutomationError} when the window is missing or the click is not observed.
+ */
+export async function measureContentOffset(handle, clientPoint, options = {}) {
+  const window = await windowByHandle(handle)
+  if (window === null) throw new AutomationError(`找不到句柄为 ${handle} 的窗口`)
+  const windowOrigin = { x: window.x, y: window.y }
+  const provisional = options.provisional ?? CONTENT_OFFSET
+  const aim = clientToScreen(windowOrigin, clientPoint, provisional)
+
+  const move = options.move ?? ((point) => desktop('move', { X: point.x, Y: point.y, Duration: 0.05 }))
+  const press = options.click ?? ((point) => desktop('click', { X: point.x, Y: point.y, Button: 'left', Count: 1 }))
+  await move(aim)
+  await press(aim)
+  await new Promise((resolve) => setTimeout(resolve, options.settleMs ?? 700))
+
+  const arrived = await options.readArrival()
+  if (arrived === null || arrived === undefined) {
+    throw new AutomationError(
+      '点击已发出，但目标应用没有报告落点，无法反解内容区偏移。' +
+        '需要应用能把点击坐标读回来（浏览器可以监听 click 事件读 clientX/clientY）。',
+    )
+  }
+  return {
+    offset: { x: aim.x - windowOrigin.x - arrived.x, y: aim.y - windowOrigin.y - arrived.y },
+    arrived,
+    aim,
+    window: { x: window.x, y: window.y, width: window.width, height: window.height },
   }
 }
 
@@ -258,9 +382,11 @@ export async function screenSize() {
 export async function clickClient(handle, client, options = {}) {
   const target = await windowByHandle(handle)
   if (target === null) throw new AutomationError(`找不到句柄为 ${handle} 的窗口，无法换算坐标`)
-  const screen = clientToScreen({ x: target.x, y: target.y }, client)
+  const windowOrigin = { x: target.x, y: target.y }
+  const offset = options.offset ?? CONTENT_OFFSET
+  const screen = clientToScreen(windowOrigin, client, offset)
   const outcome = await click({ ...screen, handle, ...options })
-  return { ...outcome, client, windowOrigin: { x: target.x, y: target.y }, offset: CONTENT_OFFSET }
+  return { ...outcome, client, windowOrigin, offset, screen }
 }
 
 /**

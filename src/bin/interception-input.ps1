@@ -93,6 +93,13 @@ public static class Interception {
     [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
     public static extern int interception_is_mouse(int device);
 
+    [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int interception_is_keyboard(int device);
+
+    // The virtual desktop bounds come from user32 rather than System.Windows.Forms: the conversion
+    // to normalised coordinates runs on every move, and loading a WinForms assembly for four
+    // integers is a dependency with no benefit.
+    [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out System.Drawing.Point point);
 
     /// A context with every mouse device intercepted.
@@ -147,24 +154,33 @@ try {
 
   # Absolute positioning is expressed in the 0..65535 normalised range across the virtual desktop,
   # not in pixels. Pixels are converted here so callers can keep thinking in screen coordinates.
+  #
+  # GetSystemMetrics indices: 76/77 are the virtual screen origin, 78/79 its size.
   function Convert-Absolute([int]$px, [int]$py) {
-    $w = [System.Windows.Forms.SystemInformation]::VirtualScreen.Width
-    $h = [System.Windows.Forms.SystemInformation]::VirtualScreen.Height
-    $left = [System.Windows.Forms.SystemInformation]::VirtualScreen.Left
-    $top = [System.Windows.Forms.SystemInformation]::VirtualScreen.Top
+    $left = [Interception]::GetSystemMetrics(76)
+    $top = [Interception]::GetSystemMetrics(77)
+    $w = [Interception]::GetSystemMetrics(78)
+    $h = [Interception]::GetSystemMetrics(79)
     $nx = [int][math]::Round((($px - $left) * 65535.0) / [math]::Max(1, $w - 1))
     $ny = [int][math]::Round((($py - $top) * 65535.0) / [math]::Max(1, $h - 1))
-    return @{ x = $nx; y = $ny; width = $w; height = $h }
+    return @{ x = $nx; y = $ny; width = $w; height = $h; left = $left; top = $top }
   }
 
   switch ($Action) {
     'probe' {
+      # The exported names carry the interception_ prefix; calling them without it fails with
+      # "does not contain a method named is_mouse", which reads like a missing API rather than a
+      # misspelled call.
+      $mice = @(1..20 | Where-Object { [Interception]::interception_is_mouse($_) -ne 0 })
+      $keys = @(1..20 | Where-Object { [Interception]::interception_is_keyboard($_) -ne 0 })
       Write-Result @{
         ok = $true
         context = $context.ToInt64()
         mouseDevice = $device
+        mouseDevices = $mice
+        keyboardDevices = $keys
         mouseStrokeBytes = $mouseSize
-        deviceCount = (@(1..20 | Where-Object { [Interception]::is_mouse($_) -ne 0 -or [Interception]::is_keyboard($_) -ne 0 }).Count)
+        hint = 'a non-empty mouseDevices list means the driver is loaded and enumerating devices'
       }
     }
 
