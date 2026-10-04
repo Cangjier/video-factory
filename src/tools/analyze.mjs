@@ -1,18 +1,21 @@
 /**
  * `video_analyze` — find out what is actually in a video before deciding what to do with it.
  *
- * Two questions the plugin could not previously answer:
+ * Two questions about the picture:
  *
  * - **Which moments matter.** Hand-picking frames with `-ss` misses the cut that mattered and
  *   wastes the budget on a static stretch. {@link module:video-factory/core/sampling} scores
  *   every decoded frame against its predecessor, so a cut or a burst of movement selects
  *   itself, and each chosen frame carries the reason it was chosen.
- * - **What it sounds like.** Transcription covers speech. Music, ambience, and sound effects
- *   are classified into AudioSet's 521 acoustic classes, which is what tells a cut whether it
- *   landed on the beat.
+ * - **What can be cut out of it.** The matting model separates a subject from a backdrop that is
+ *   not a flat colour, one frame per call so the cost of each is visible.
  *
- * Neither action decides anything: they report moments, scores, and labels. Choosing the order
- * and the pacing stays with DSH.
+ * Neither action decides anything: they report moments, scores and masks. Choosing the order and
+ * the pacing stays with DSH.
+ *
+ * What the soundtrack *is* used to be answered here too. That capability moved to the separate
+ * `dsh-video-audio` plugin: `audio_measure {action:"audio_events"}` classifies a soundtrack into
+ * AudioSet's 521 classes, and `audio_measure {action:"speech_map"}` finds the pauses.
  *
  * @module video-factory/tools/analyze
  */
@@ -26,18 +29,11 @@ const SAMPLE_STRATEGIES = ['adaptive', 'uniform', 'scene_change', 'motion_aware'
 export function createAnalyzeTool(actions) {
   return defineFamilyTool({
     name: ANALYZE_TOOL_NAME,
-    description:
-      'Find out what a video contains before editing it, and cut a subject out of its backdrop. Every action reports measurements or produces a defined artifact; none of them chooses for you.',
-    actionsHelp:
-      'sample_frames: score every decoded frame against its predecessor and return the moments worth a look, each with the reason it was picked (scene_change / motion / periodic / max_interval_fallback), its sceneScore, and its timestamp. Optionally writes those frames as JPEGs so they can be read as images. ' +
-      'audio_events: classify the soundtrack into AudioSet\'s 521 acoustic classes with per-segment timestamps — how you find out where music starts, or that a stretch is silence, which transcription cannot tell you. ' +
-      'audio_status: report whether the audio classifier is installed and what it can do, without analysing anything. ' +
-      'matte: cut a subject out of its backdrop with a learned model and write a PNG with a transparent background — one image, or one frame of a video when "at" is given. This is the route for a backdrop that is not a flat colour; a green screen should use the plan-level chroma_key instead, which is exact and about two thousand times cheaper. ' +
-      'matte_status: report whether the matting model is installed, and when given a "duration", what a video matte would cost at several mask rates.',    actions: ['sample_frames', 'audio_events', 'audio_status', 'matte', 'matte_status'],
+    actions: ['sample_frames', 'matte', 'matte_status'],
     extraProperties: {
       target: {
         type: 'string',
-        description: 'sample_frames / audio_events / matte: the file to analyse. matte also accepts a still image.',
+        description: 'sample_frames / matte: the file to analyse. matte also accepts a still image.',
       },
       strategy: {
         type: 'string',
@@ -91,32 +87,6 @@ export function createAnalyzeTool(actions) {
         type: 'string',
         description: 'sample_frames: where extracted JPEGs go. Defaults to tmp/frames beside the plugin.',
       },
-      start: {
-        type: 'number',
-        description: 'audio_events: analyse only from this second onwards.',
-      },
-      duration: {
-        type: 'number',
-        description: 'audio_events: analyse only this many seconds. Use with start to walk a long file in pieces.',
-      },
-      topK: {
-        type: 'number',
-        description: 'audio_events: how many labels to keep per segment. Default 3.',
-      },
-      minScore: {
-        type: 'number',
-        description: 'audio_events: score below which a label is dropped entirely. Default 0.1.',
-      },
-      silenceRms: {
-        type: 'number',
-        description:
-          'audio_events: segments quieter than this root-mean-square level are reported as silent instead of classified. Default 0.002.',
-      },
-      includeSegments: {
-        type: 'boolean',
-        description:
-          'audio_events: include the per-segment labels in the result. Default true; set false for just the grouped label-to-timestamps map.',
-      },
       at: {
         type: 'number',
         description:
@@ -138,7 +108,7 @@ export function createAnalyzeTool(actions) {
       duration: {
         type: 'number',
         description:
-          'matte_status: when given, report what a video matte of this many seconds would cost at several mask rates, so the rate can be chosen with the price in view.',
+          'matte_status: the video length whose matte cost should be estimated at several mask rates. (For "classify only this many seconds of the soundtrack" the action is audio_measure {action:"audio_events"} in dsh-video-audio.)',
       },
       cwd: CWD_PROPERTY,
     },

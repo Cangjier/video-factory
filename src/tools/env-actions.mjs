@@ -10,16 +10,6 @@
 import { resolve } from 'node:path'
 import { resolveBinary, capabilitiesOf, versionOf, vendoredBuild } from '../core/index.mjs'
 import { InstallError, installFfmpeg, vendoredState } from '../core/install.mjs'
-import {
-  OCR_SOURCES,
-  installOcr,
-  ocrInstallState,
-  readManifest,
-  removeOcr,
-} from '../core/ocr-install.mjs'
-import { ocrReport } from '../core/ocr.mjs'
-import { audioEventState } from '../core/audio-events.mjs'
-import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
 import { matteState } from '../core/matte.mjs'
 import { installMatte, removeMatte, verifyInstalledMatte } from '../core/matte-install.mjs'
 import {
@@ -29,14 +19,6 @@ import {
   scan as scanMaterials,
 } from '../core/materials.mjs'
 import { PRESETS } from '../core/plan.mjs'
-import {
-  INPUT_TRANSPORTS,
-  TRANSPORT_PREFERENCE,
-  driverAvailable,
-  verifyVirtualHidInput,
-  virtualKeyboardAvailable,
-  virtualMouseAvailable,
-} from '../core/automation.mjs'
 import { VideoFactoryError } from './shared.mjs'
 
 /**
@@ -86,10 +68,10 @@ export function createEnvActions(config, logger) {
           requiresKey: false,
         },
         pathBudget: config.pathBudget,
-        // Optional models, reported as facts rather than as problems: the plugin works without
-        // any of them, and a missing model only disables the action that needs it.
-        ocr: ocrReport(config),
-        audio: audioEventState(),
+        // Optional model, reported as a fact rather than as a problem: the plugin works without
+        // it, and a missing model only disables the action that needs it. The runtime it shares
+        // with audio event detection lives in another plugin now, so this says where it was found
+        // — including "nowhere" — rather than reporting a capability that is not this plugin's.
         matte: matteState(),
       }
 
@@ -112,82 +94,19 @@ export function createEnvActions(config, logger) {
       if (ffprobe !== null) report.ffprobe.version = await versionOf(ffprobe)
 
       /*
-       * Input transports, reported because they decide whether this machine can drive a browser or an
-       * application at all, and because the answer differs from machine to machine.
-       *
-       * `virtualkbd` and `virtualmouse` are real HID devices created by our own driver, and they are the ones
-       * to prefer: being devices, nothing above the HID layer can treat their input as synthetic. `driver` is
-       * the Interception filter, which is only reachable while that filter is installed — on this machine it
-       * is not. `sendinput` always works and needs no installation.
-       *
-       * Each is probed rather than assumed — the files being present says nothing about whether the driver
-       * actually started.
+       * Desktop automation used to be reported here: the input transports, the pointer canary and the
+       * screen coordinates. It is a plugin of its own now (`dsh-computer-use`), which is why calling
+       * this probe no longer moves the user's pointer as a side effect. Text recognition left the same
+       * way and is now `dsh-ocr` (`text_*`). Audio event detection and everything else about sound
+       * left for `dsh-video-audio` (`audio_*`), so `audio` is no longer a key here: ask
+       * `audio_setup {action:"status"}` instead. What is left is what a video pipeline needs —
+       * ffmpeg, the matting model and its borrowed runtime, and the cloud key.
        */
-      // The devices are verified, not merely opened: a virtual HID device can be present, bound and accepting
-      // reports while the system declines to act on them, so "the client could open it" is not an answer. The
-      // pointer is the canary because it can be checked and a keystroke cannot; the check moves it a little
-      // and puts it back.
-      const virtualHid = await verifyVirtualHidInput()
-      const virtualKeyboard = await virtualKeyboardAvailable()
-      const virtualMouse = await virtualMouseAvailable()
-      const filter = await driverAvailable()
-      report.virtualHidVerified = {
-        works: virtualHid.works,
-        detail: virtualHid.works
-          ? '虚拟 HID 设备已实际验证：指针按要求移动到位。'
-          : `虚拟 HID 设备存在并接受报告，但系统未对其作出反应，因此判定为不可用：${virtualHid.reason}`,
-      }
-      report.input = {
-        transports: INPUT_TRANSPORTS,
-        preference: TRANSPORT_PREFERENCE,
-        virtualKeyboard: {
-          available: virtualKeyboard.available,
-          reason: virtualKeyboard.reason,
-          note: '自研 VHF 虚拟 HID 键盘；作为真实设备进入输入栈，应用无法与物理键盘区分。',
-        },
-        virtualMouse: {
-          available: virtualMouse.available,
-          reason: virtualMouse.reason,
-          note:
-            '自研 VHF 虚拟 HID 鼠标；绝对定位，实测误差不超过 1 像素，左右键与滚轮均可用。' +
-            '「可用」是经实际移动指针验证的结论，不是仅凭能否打开设备得出的。',
-        },
-        filterDriver: {
-          available: filter.available,
-          reason: filter.reason,
-          note:
-            'Interception 过滤驱动，需单独安装才能使用。此前装好时鼠标路径可用、键盘路径接受了按键却一个都不到达；' +
-            '原因未查明——曾归因于虚拟机模拟的 PS/2 键盘，但没有找到任何一手依据。',
-        },
-        sendInput: { available: true, note: 'Win32 SendInput；无需安装，始终可用。' },
-      }
-      if (!virtualKeyboard.available || !virtualMouse.available) {
-        const missing = [
-          virtualKeyboard.available ? null : '键盘',
-          virtualMouse.available ? null : '鼠标',
-        ].filter(Boolean).join('与')
-        report.notes = [
-          ...(report.notes ?? []),
-          `虚拟 HID ${missing}不可用。输入将回退到 SendInput（若另行装了 Interception，也可能回退到它）。` +
-            '安装方式：先运行 components/vhfkey/build.ps1，再运行 components/vhfkey/clean-install.ps1——' +
-            'clean-install 先删驱动包，否则旧设备节点删不掉，每装一次就多累积两个。',
-        ]
-      }
 
       if (!report.ark.keyPresent) {
         report.notes = [
           `未设置 ${config.ark.apiKeyEnv}，云端生成镜头不可用；本地剪辑、配音、字幕全部照常工作。`,
         ]
-      }
-
-      /*
-       * OCR is reported here because its absence changes what `video_inspect {action:"ocr"}` can
-       * do, and because the answer is not a problem: Windows' own recogniser always exists. It is
-       * a note, with the one command that fixes the accuracy.
-       */
-      report.ocr = ocrReport(config)
-      if (!report.ocr.available) {
-        report.notes = [...(report.notes ?? []), report.ocr.note]
       }
 
       report.problems = problems
@@ -250,96 +169,6 @@ export function createEnvActions(config, logger) {
       } catch (error) {
         if (error instanceof MaterialError) throw new VideoFactoryError(`video_env scan: ${error.message}`)
         throw error
-      }
-    },
-
-    /**
-     * Install, or remove, an offline OCR engine.
-     *
-     * Downloading is the only way a fresh machine gets an accurate reader, and it is far cheaper
-     * to trigger from here than to explain the manual steps. The package's SHA-256 is checked
-     * before anything is unpacked, so a truncated or substituted download cannot become the thing
-     * that reads the user's screenshots.
-     *
-     * @param {object} args - the request.
-     * @returns {Promise<object>} the installation state.
-     */
-    async install_ocr(args) {
-      if (args.remove === true) {
-        const id = typeof args.source === 'string' && args.source !== '' ? args.source : undefined
-        const result = removeOcr(id)
-        return {
-          removed: result.removed,
-          active: result.active,
-          reason: result.removed.length === 0 ? '本来就没有安装' : '已删除',
-          state: ocrInstallState(),
-        }
-      }
-
-      const id = typeof args.source === 'string' && args.source !== '' ? args.source : undefined
-      if (id !== undefined && OCR_SOURCES[id] === undefined) {
-        throw new VideoFactoryError(
-          `video_env install_ocr: 未知的 source ${JSON.stringify(id)}；可选：${Object.keys(OCR_SOURCES).join(', ')}`,
-        )
-      }
-      try {
-        const result = await installOcr({
-          source: id,
-          force: args.force === true,
-          prune: args.prune === true,
-          archive: typeof args.archive === 'string' && args.archive !== '' ? resolve(args.archive) : undefined,
-          onProgress: (line) => logger.info(`video-factory install_ocr: ${line}`),
-        })
-        return {
-          ...result,
-          manifest: readManifest(),
-          // The state is re-read from disk rather than echoed back, so "installed" always means
-          // the executable is there.
-          state: ocrInstallState(),
-          ocr: ocrReport(config),
-        }
-      } catch (error) {
-        if (error instanceof InstallError) throw new VideoFactoryError(`安装 OCR 引擎失败：${error.message}`)
-        throw error
-      }
-    },
-
-    /**
-     * Provision audio event detection: the YAMNet model plus the WASM inference runtime.
-     *
-     * Separate from `install_ocr` because the two are independent — a machine can happily have
-     * one and not the other — and because the licensing story differs. Both the model files and
-     * the runtime tarballs are checked against recorded hashes before anything is written.
-     *
-     * @param {object} args - the request.
-     * @returns {Promise<object>} the installation state.
-     */
-    async install_audio(args) {
-      if (args.remove === true) {
-        const result = removeAudio({ onProgress: (line) => logger.info(`video-factory install_audio: ${line}`) })
-        return {
-          removed: result.removed,
-          directory: result.directory,
-          reason: result.removed ? '已删除' : '本来就没有安装',
-          state: audioEventState(),
-        }
-      }
-
-      try {
-        const result = await installAudio({
-          force: args.force === true,
-          modelArchive: typeof args.archive === 'string' && args.archive !== '' ? resolve(args.archive) : undefined,
-          onProgress: (line) => logger.info(`video-factory install_audio: ${line}`),
-        })
-        return {
-          ...result,
-          // Re-read from disk: "installed" must mean the files are there, not that a call
-          // returned without throwing.
-          state: audioEventState(),
-          verify: verifyInstalledAudio(),
-        }
-      } catch (error) {
-        throw new VideoFactoryError(`安装音频事件检测失败：${error.message}`)
       }
     },
 

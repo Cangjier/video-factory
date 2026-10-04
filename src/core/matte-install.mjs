@@ -2,9 +2,12 @@
  * Provisioning the matting model.
  *
  * One file, 4.36 MB, pinned by SHA-256 — the same shape as the other two installers. The
- * inference runtime is deliberately **not** re-fetched here: `install_audio` already vendors
- * `onnxruntime-web`, and both features share it. `matteState` therefore reports a missing runtime
- * as "run install_audio", which is the actionable instruction, rather than duplicating 13 MB.
+ * inference runtime is deliberately **not** re-fetched here. It used to be vendored by
+ * `install_audio`, which lived in this plugin; both that action and the runtime moved to the
+ * separate `dsh-video-audio` plugin (see {@link module:video-factory/core/matte-runtime}). Matting
+ * still shares it rather than duplicating 13 MB, so `matteState` and this installer both report a
+ * missing runtime by naming the plugin that owns it — and refuse before downloading a model that
+ * could not then be loaded.
  *
  * The provenance chain is a single personal re-upload of an Apache-2.0 model, so the recorded
  * hash is a tamper-detection and reproducibility anchor, exactly as with YAMNet — not evidence
@@ -16,6 +19,7 @@ import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { download } from './install.mjs'
+import { runtimeInstallHint } from './matte-runtime.mjs'
 import {
   MATTE_MODEL,
   MATTE_MODEL_SPEC,
@@ -84,7 +88,9 @@ export function writeMatteManifest() {
       : [],
     runtime: {
       shared: true,
-      note: '推理运行时由 install_audio 提供（vendor/audio/runtime），抠图与音频事件检测共用，不重复下载。',
+      note:
+        '推理运行时由独立插件 dsh-video-audio 提供（它自己的 vendor/audio/runtime，' +
+        '旧机器上可能还在本仓库的 vendor/audio/runtime），抠图与音频事件检测共用，不重复下载。',
     },
     recordedAt: new Date().toISOString(),
   }
@@ -118,9 +124,19 @@ export async function installMatte(options = {}) {
 
   if (!force) {
     const current = verifyInstalledMatte()
-    if (current.ok && matteState().runtime) {
+    // The runtime is a hard prerequisite, so it is part of the skip test. Testing only the model
+    // would download 4.36 MB here and *then* say the runtime is missing — paying for a model that
+    // cannot load. A missing runtime fails before the download instead.
+    const state = matteState()
+    if (current.ok && state.runtime) {
       onProgress('抠图模型已安装且校验通过，跳过下载。')
-      return { installed: false, skipped: true, verify: current, state: matteState() }
+      return { installed: false, skipped: true, verify: current, state }
+    }
+    if (!state.runtime) {
+      throw new MatteError(
+        `${runtimeInstallHint()}（当前 ${state.runtimeDir} 里没有 onnxruntime-web。）` +
+          '先装运行时再装模型，否则这 4.36 MB 白下。',
+      )
     }
   }
 
@@ -164,10 +180,7 @@ export async function installMatte(options = {}) {
   const state = matteState()
 
   if (state.runtime === false) {
-    onProgress(
-      '模型已就位，但推理运行时缺失。抠图与音频事件检测共用 vendor/audio/runtime，' +
-        '请运行 video_env {action:"install_audio"} 安装它。',
-    )
+    onProgress(`模型已就位，但推理运行时缺失。${runtimeInstallHint()}`)
   } else {
     onProgress(`完成：${(manifest.files[0]?.bytes / 1024 / 1024).toFixed(2)} MB（运行时共用，不重复下载）`)
   }

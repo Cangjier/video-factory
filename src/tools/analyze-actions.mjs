@@ -1,10 +1,13 @@
 /**
- * `video_analyze` actions: adaptive frame sampling, audio event detection, and matting.
+ * `video_analyze` actions: adaptive frame sampling and matting.
  *
- * Every action here is a measurement or a transform of the analysis kind. `sample_frames` says
- * where the cuts and the movement are; `audio_events` says what the soundtrack is and when;
- * `matte` separates a subject from its backdrop. None of them says which shot to use, how long to
- * hold it, or whether the result is any good — that stays with DSH.
+ * Both are measurements or transforms of the analysis kind. `sample_frames` says where the cuts
+ * and the movement are; `matte` separates a subject from its backdrop. Neither says which shot to
+ * use, how long to hold it, or whether the result is any good — that stays with DSH.
+ *
+ * Sound analysis used to live here (`audio_events`, `audio_status`). It moved to the separate
+ * `dsh-video-audio` plugin with the rest of the audio capability: this tool now asks only about
+ * pictures, and the audio question is `audio_measure {action:"audio_events"}`.
  *
  * @module video-factory/tools/analyze-actions
  */
@@ -12,8 +15,6 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { run } from '../core/ffmpeg.mjs'
 import { sampleFrames } from '../core/sampling.mjs'
-import { AUDIO_TMP_DIR, detectAudioEvents, audioEventState } from '../core/audio-events.mjs'
-import { audioInstallState } from '../core/audio-install.mjs'
 import { MATTE_TMP_DIR, matteImage, matteState, planMasks } from '../core/matte.mjs'
 import { matteInstallState } from '../core/matte-install.mjs'
 import { PLUGIN_ROOT } from '../core/env.mjs'
@@ -171,70 +172,6 @@ export function createAnalyzeActions(config, logger) {
     },
 
     /**
-     * Classify a soundtrack into timestamped acoustic events.
-     * @param {object} args - the tool arguments.
-     * @param {object} context - the tool context.
-     * @returns {Promise<object>} the audio event report.
-     */
-    async audio_events(args, context) {
-      if (typeof args.target !== 'string' || args.target === '') {
-        throw new VideoFactoryError('video_analyze audio_events: 需要 "target"（要分析的视频或音频路径）。')
-      }
-      const target = resolve(context.cwd, args.target)
-      if (!existsSync(target)) {
-        throw new VideoFactoryError(`video_analyze audio_events: 文件不存在：${target}`)
-      }
-
-      try {
-        const report = await detectAudioEvents(target, {
-          config,
-          start: Number.isFinite(args.start) ? args.start : undefined,
-          duration: Number.isFinite(args.duration) ? args.duration : undefined,
-          topK: Number.isFinite(args.topK) ? args.topK : undefined,
-          minScore: Number.isFinite(args.minScore) ? args.minScore : undefined,
-          silenceRms: Number.isFinite(args.silenceRms) ? args.silenceRms : undefined,
-          onProgress: (progress) => {
-            if (progress.done % 25 === 0 || progress.done === progress.total) {
-              logger.info(`video-factory analyze: 音频分类 ${progress.done}/${progress.total}`)
-            }
-          },
-        })
-        if (args.includeSegments === false) {
-          const { segments, ...rest } = report
-          return { ...rest, segmentCount: segments.length }
-        }
-        return report
-      } catch (error) {
-        throw asToolError('audio_events', error)
-      }
-    },
-
-    /**
-     * Report whether audio event detection is installed.
-     * @returns {object} the state.
-     */
-    async audio_status() {
-      const state = audioEventState()
-      if (!state.available) {
-        return { ...state, installWith: 'video_env {action:"install_audio"}' }
-      }
-      const installed = audioInstallState()
-      return {
-        available: state.available,
-        kind: state.kind,
-        classes: state.classes,
-        vendorDir: state.vendorDir,
-        fileCount: installed.fileCount,
-        totalBytes: installed.totalBytes,
-        modelBytes: installed.modelBytes,
-        runtimeBytes: installed.runtimeBytes,
-        model: state.model,
-        runtime: state.runtime,
-        scratchDir: AUDIO_TMP_DIR,
-      }
-    },
-
-    /**
      * Cut a subject out of its backdrop.
      *
      * One image, or if `at` is given, one frame of a video. Deliberately not a whole video: the
@@ -302,8 +239,8 @@ export function createAnalyzeActions(config, logger) {
         return {
           ...state,
           installWith: state.missing.includes('model')
-            ? 'video_env {action:"install_matte"}'
-            : 'video_env {action:"install_audio"}（推理运行时由它提供）',
+            ? 'video_setup {action:"install_matte"}'
+            : 'video_setup {action:"install_audio"}（推理运行时由它提供）',
         }
       }
       const installed = matteInstallState()

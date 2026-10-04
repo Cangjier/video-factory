@@ -31,7 +31,7 @@ import { pathToFileURL } from 'node:url'
 import { PLUGIN_ROOT } from './env.mjs'
 import { resolveTool } from './ffmpeg.mjs'
 import { toFfmpegColor } from './filter.mjs'
-import { AUDIO_VENDOR_DIR, ORT_WASM_BINARY, ORT_WASM_ENTRY } from './audio-events.mjs'
+import { resolveMatteRuntime, runtimeInstallHint } from './matte-runtime.mjs'
 
 /** Error type for a matting request this plugin refuses or cannot carry out. */
 export class MatteError extends Error {
@@ -92,11 +92,14 @@ let sessionPromise = null
  * @returns {{available: boolean, model: boolean, runtime: boolean, runtimeDir: string, missing: string[], reason: string|null, bytes: number|null}} the state.
  */
 export function matteState() {
+  // Resolved on every call rather than at import: the runtime can be installed (by the sibling
+  // plugin) while this process is running, and a cached "missing" would then be wrong forever.
+  const runtime = resolveMatteRuntime()
   const model = existsSync(MATTE_MODEL)
-  const runtime = existsSync(ORT_WASM_ENTRY) && existsSync(ORT_WASM_BINARY)
+  const runtimePresent = runtime.source !== 'missing'
   const missing = []
   if (!model) missing.push('model')
-  if (!runtime) missing.push('runtime')
+  if (!runtimePresent) missing.push('runtime')
 
   let bytes = null
   if (model) bytes = statSync(MATTE_MODEL).size
@@ -104,17 +107,17 @@ export function matteState() {
   return {
     available: missing.length === 0,
     model,
-    runtime,
-    runtimeDir: AUDIO_VENDOR_DIR,
+    runtime: runtimePresent,
+    runtimeDir: runtime.dir,
+    runtimeSource: runtime.source,
     missing,
     bytes,
     reason:
       missing.length === 0
         ? null
         : missing.includes('runtime') && !missing.includes('model')
-          ? '推理运行时尚未安装（它由 install_audio 提供，抠图与音频事件检测共用同一个 WASM 运行时）。' +
-            '运行 video_env {action:"install_audio"}。'
-          : '抠图模型尚未安装。运行 video_env {action:"install_matte"}。',
+          ? runtimeInstallHint()
+          : '抠图模型尚未安装。运行 video_setup {action:"install_matte"}。',
   }
 }
 
@@ -130,14 +133,19 @@ export async function loadMatteSession() {
     const state = matteState()
     if (!state.available) throw new MatteError(state.reason ?? '抠图不可用')
 
-    const ort = await import(pathToFileURL(ORT_WASM_ENTRY).href)
+    // Resolved here, not captured at import: the runtime may have been installed after this
+    // process started, and the paths must name wherever it actually is.
+    const runtime = resolveMatteRuntime()
+    const ort = await import(pathToFileURL(runtime.entry).href)
     // One thread, matching the audio path: the measured 16-thread speedup on this model was
     // 1.08x, so a worker pool would cost threads for nothing.
     ort.env.wasm.numThreads = 1
     ort.env.wasm.proxy = false
     ort.env.wasm.wasmPaths = {
-      wasm: pathToFileURL(ORT_WASM_BINARY).href,
-      mjs: pathToFileURL(join(AUDIO_VENDOR_DIR, 'runtime', 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.mjs')).href,
+      wasm: pathToFileURL(runtime.binary).href,
+      // The threaded loader must be named explicitly, because it is resolved relative to the
+      // document by default and this process has no document.
+      mjs: pathToFileURL(join(runtime.dir, 'runtime', 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.mjs')).href,
     }
 
     const session = await ort.InferenceSession.create(readFileSync(MATTE_MODEL), {

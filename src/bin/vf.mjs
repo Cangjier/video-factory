@@ -17,8 +17,6 @@ import { parseArgs } from 'node:util'
 import { capabilitiesOf, resolveBinary, versionOf, vendoredBuild } from '../core/env.mjs'
 import { installFfmpeg, vendoredState } from '../core/install.mjs'
 import { sampleFrames } from '../core/sampling.mjs'
-import { audioEventState, detectAudioEvents } from '../core/audio-events.mjs'
-import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
 import { matteImage, matteState } from '../core/matte.mjs'
 import { installMatte, removeMatte, verifyInstalledMatte } from '../core/matte-install.mjs'
 import { describe as describeInventory, inventoryToJson, scan } from '../core/materials.mjs'
@@ -68,7 +66,9 @@ const COMMANDS = {
       ffmpeg: ffmpeg === null ? { found: false } : { found: true, path: ffmpeg },
       ffprobe: ffprobe === null ? { found: false } : { found: true, path: ffprobe },
       vendored: vendoredBuild(),
-      audio: audioEventState(),
+      // Matting only. Sound is not this plugin's any more: the audio capability, its YAMNet model
+      // and the runtime matte borrows all belong to the separate dsh-video-audio plugin, whose own
+      // CLI reports them (`va.mjs doctor` / `va.mjs status`).
       matte: matteState(),
       arkKeyPresent: typeof process.env.ARK_API_KEY === 'string' && process.env.ARK_API_KEY !== '',
       problems,
@@ -100,22 +100,6 @@ const COMMANDS = {
     return 0
   },
 
-  /** Install, or remove, the audio event detection model and runtime. */
-  async 'install-audio'(options) {
-    if (options.remove === true) {
-      const result = removeAudio({ onProgress: (message) => console.error(message) })
-      emit({ ...result, state: audioEventState() })
-      return 0
-    }
-    const result = await installAudio({
-      force: options.force === true,
-      modelArchive: options.archive,
-      onProgress: (message) => console.error(message),
-    })
-    emit({ ...result, state: audioEventState(), verify: verifyInstalledAudio() })
-    return 0
-  },
-
   /** Sample the moments of a video worth looking at. */
   async frames(options) {
     const target = options.paths?.[0]
@@ -144,40 +128,6 @@ const COMMANDS = {
           `  ${String(frame.at).padStart(8)}s  ${frame.reason.padEnd(23)} ` +
             `scene=${String(frame.sceneScore).padStart(7)}  gap=${frame.gapFromPrevious}`,
         )
-      }
-    }
-    return 0
-  },
-
-  /** Classify a soundtrack into timestamped acoustic events. */
-  async audio(options) {
-    const target = options.paths?.[0]
-    if (target === undefined) throw new Error('audio: <文件> is required')
-    const report = await detectAudioEvents(resolve(target), {
-      config: {},
-      ...defined({
-        start: numberOrUndefined(options.start),
-        duration: numberOrUndefined(options.duration),
-        topK: numberOrUndefined(options['top-k']),
-        minScore: numberOrUndefined(options['min-score']),
-      }),
-    })
-    if (options.json === true) emit(report)
-    else {
-      console.log(
-        `${report.durationSec.toFixed(2)}s，${report.soundtrack.windows} 个分析窗` +
-          `（分类 ${report.soundtrack.classified}，静音 ${report.soundtrack.silent}）`,
-      )
-      console.log('\n事件（标签 → 时间点）：')
-      for (const [label, times] of Object.entries(report.events)) {
-        console.log(`  ${label.padEnd(24)} ${times.length} 次  ${times.slice(0, 8).join(', ')}${times.length > 8 ? ' …' : ''}`)
-      }
-      console.log('\n逐窗：')
-      for (const segment of report.segments) {
-        const labels = segment.silent
-          ? '(静音)'
-          : segment.labels.map((l) => `${l.label} ${l.score}`).join(' | ')
-        console.log(`  ${String(segment.at).padStart(8)}s  rms=${String(segment.rms).padEnd(8)} ${labels}`)
       }
     }
     return 0
@@ -379,16 +329,14 @@ async function main() {
 用法：node src/bin/vf.mjs <命令> [选项]
 
 命令：
-  doctor                             检查 ffmpeg / ffprobe、模型组件与云端 Key
+  doctor                             检查 ffmpeg / ffprobe、抠图模型与云端 Key
   install [--force]                  把 ffmpeg 装进 vendor/
-  install-audio [--force] [--remove]   把 YAMNet 模型与 WASM 运行时装进 vendor/audio/
   frames <视频> [--strategy adaptive|uniform|scene_change|motion_aware]
              [--probe-fps 4] [--scene-threshold 30] [--motion-threshold 5] [--json]
                                        自适应抽帧：找剪切点与运动，报出每帧的选中理由与分值
-  audio <文件> [--start 秒] [--duration 秒] [--top-k 3] [--min-score 0.1] [--json]
-                                       识别音轨里的声学事件（音乐/环境音/音效）与时间点
   install-matte [--force] [--archive <本地.onnx>] [--remove]
-                                       把 U²-Net 抠图模型装进 vendor/matte/（运行时与 audio 共用）
+                                       把 U²-Net 抠图模型装进 vendor/matte/
+                                       （推理运行时由独立插件 dsh-video-audio 提供）
   matte <图片|视频> [--at <秒>] [--feather <像素>] [--out <png>] [--keep-mask] [--json]
                                        抠出主体，输出透明背景 PNG（单帧约 2 秒）
   scan <目录> [--json] [--no-dedupe] 盘点素材

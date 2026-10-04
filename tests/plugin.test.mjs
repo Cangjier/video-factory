@@ -266,15 +266,20 @@ test('video_inspect carries no text recognition any more', async () => {
   }
 })
 
-test('video_setup no longer provisions an OCR engine', async () => {
+test('video_setup provisions only what this plugin still owns', async () => {
   const { ctx, registered } = fakeContext()
   apply(ctx, {})
   const setup = registered.find((definition) => definition.name === 'video_setup')
 
-  assert.deepEqual(setup.parameters.properties.action.enum, ['install_ffmpeg', 'install_audio', 'install_matte'])
+  assert.deepEqual(setup.parameters.properties.action.enum, ['install_ffmpeg', 'install_matte'])
   await assert.rejects(
     () => setup.execute({ action: 'install_ocr' }, { cwd: process.cwd() }),
     /unknown action/,
     'the engine installer moved to dsh-ocr text_setup {action:"install"}',
+  )
+  await assert.rejects(
+    () => setup.execute({ action: 'install_audio' }, { cwd: process.cwd() }),
+    /unknown action/,
+    'the audio model and its runtime moved to dsh-video-audio audio_setup {action:"install"}',
   )
 })
