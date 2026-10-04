@@ -22,14 +22,6 @@ export const RENDER_TOOL_NAME = 'video_render'
 export function createRenderTool(actions) {
   return defineFamilyTool({
     name: RENDER_TOOL_NAME,
-    description:
-      'Render video with ffmpeg. Deterministic: the same plan always produces the same file. Prefer the individual stages so a failure is attributable and re-running is cheap; use "build" only when you want the whole chain run in one call.',
-    actionsHelp:
-      'scene: render ONE scene to a uniform intermediate clip. The most expensive and most retryable step, and the one that makes every clip interchangeable. ' +
-      'assemble: join the clips into one timeline — stream copy when there are no transitions, a single filter graph with xfade when there are. ' +
-      'finalize: mix narration and music (sidechain ducking), normalize loudness (EBU R128), and burn or mux subtitles — the picture is encoded at most once here. ' +
-      'deliver: write the cover frame, the contact sheet, and build-report.json. ' +
-      'build: all four in sequence. It makes no decisions, it just runs them.',
     actions: ['scene', 'assemble', 'finalize', 'deliver', 'build'],
     extraProperties: {
       plan: { type: 'string', description: 'Path to plan.json. Give either plan or planData.' },

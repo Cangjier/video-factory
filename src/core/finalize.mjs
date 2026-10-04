@@ -168,7 +168,7 @@ export async function finalize(timeline, plan, options) {
   if (stagedSubs !== null && plan.subtitles.burn) {
     const fontsDir = existsSync(join(workDir, 'fonts')) ? ":fontsdir='fonts'" : ''
     filters.push(
-      `[0:v]subtitles='${stagedSubs}'${fontsDir}:force_style='${subtitleStyle(plan.subtitles)}'[vout]`,
+      `[0:v]subtitles='${stagedSubs}'${fontsDir}:force_style='${subtitleStyle(plan.subtitles, plan)}'[vout]`,
     )
     videoOut = 'vout'
     burned = true

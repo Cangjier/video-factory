@@ -196,3 +196,36 @@ test('subtitleStyle emits ASS colours in the right order', () => {
   assert.ok(style.includes('FontSize=44'))
   assert.ok(style.includes('MarginV=200'))
 })
+
+test('subtitleStyle converts canvas pixels into ASS script units', () => {
+  // The SRT is converted at the default 384x288 script resolution, so values measured in
+  // canvas pixels have to be divided down or all of them land 3.75x too large. 78 px is what
+  // `video_narrate {action:"layout"}` advises for a 1920x1080 canvas, and it has to come out
+  // as 21 script units; writing 78 through unchanged is what rendered 250 px glyphs.
+  const style = subtitleStyle(
+    { fontSize: 78, marginV: 112, outline: 3, primaryColor: '#FFFFFF', outlineColor: '#000000' },
+    { width: 1920, height: 1080 },
+  )
+  assert.ok(style.includes('FontSize=21'), style)
+  assert.ok(style.includes('MarginV=30'), style)
+  assert.ok(style.includes('Outline=1'), style)
+})
+
+test('subtitleStyle leaves a canvas that already matches the script height alone', () => {
+  const style = subtitleStyle(
+    { fontSize: 44, marginV: 200, outline: 3, primaryColor: '#FFFFFF', outlineColor: '#000000' },
+    { width: 512, height: 288 },
+  )
+  assert.ok(style.includes('FontSize=44'))
+  assert.ok(style.includes('MarginV=200'))
+})
+
+test('subtitleStyle never rounds a visible outline away to nothing', () => {
+  // One script unit is 3.75 canvas pixels at 1080p, so the floor of 1 still leaves a
+  // visible edge; rounding 0.8 down to 0 would silently drop the outline entirely.
+  const style = subtitleStyle(
+    { fontSize: 44, marginV: 200, outline: 1, primaryColor: '#FFFFFF', outlineColor: '#000000' },
+    { width: 1920, height: 1080 },
+  )
+  assert.ok(style.includes('Outline=1'), style)
+})

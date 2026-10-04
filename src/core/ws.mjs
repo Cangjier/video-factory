@@ -13,11 +13,24 @@
  * header and {@link connect}'s result always reports `compressed === false`.
  * Sending that header is what makes the exchange fragile, so it is simply absent.
  *
+ * PROXY
+ * -----
+ * When the machine reaches the internet only through a system proxy, a bare
+ * `tls.connect` to this host is reset before the TLS handshake finishes. That is not a
+ * hypothetical: `video_narrate {action:"synthesize"}` failed with `ECONNRESET` on such a
+ * machine while every other networked action in the plugin worked, because the installer
+ * had learned to tunnel and this transport had not. The socket is therefore established
+ * through {@link connectThroughProxy} whenever {@link systemProxy} reports one, which also
+ * means {@link connect} can no longer create its socket synchronously — it returns the
+ * emitter immediately and establishes the socket in the background, exactly as it did
+ * before, so callers attach their listeners the same way.
+ *
  * @module video-factory/core/ws
  */
 import tls from 'node:tls'
 import crypto from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { connectThroughProxy, systemProxy } from './proxy.mjs'
 
 /** The RFC 6455 handshake GUID, concatenated with the client key and SHA-1'd. */
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
@@ -97,6 +110,12 @@ function parseHead(text) {
  * `compressed` flag. `text` and `binary` always deliver one whole message, with
  * fragments already reassembled.
  *
+ * The socket is established synchronously when no proxy is configured and through a
+ * `CONNECT` tunnel otherwise, so either way an error surfaces on `error` rather than by
+ * throwing from this call. A proxied socket arrives with its TLS handshake already
+ * complete, which is why the upgrade request is sent immediately in that case instead of
+ * waiting for `secureConnect`.
+ *
  * @param {object} options - connection options.
  * @param {string} options.url - a `wss://` URL; the query string is sent verbatim.
  * @param {Record<string,string>} [options.headers] - extra request headers, such as `Origin` and `Cookie`.
@@ -111,10 +130,10 @@ export function connect(options) {
   const key = crypto.randomBytes(16).toString('base64')
   const expectedAccept = crypto.createHash('sha1').update(key + GUID).digest('base64')
   const port = url.port === '' ? 443 : Number(url.port)
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-  const socket = tls.connect({ host: url.hostname, port, servername: url.hostname })
-  socket.setNoDelay(true)
-
+  let socket = null
+  let abandoned = false
   let handshakeDone = false
   let closing = false
   let closeEmitted = false
@@ -138,131 +157,23 @@ export function connect(options) {
     pendingError = null
     queueMicrotask(() => emitter.emit('error', error))
   })
-  const fail = (error) => {
-    report(error)
-    socket.destroy()
-  }
   const emitClose = () => {
     if (closeEmitted) return
     closeEmitted = true
     emitter.emit('close')
   }
-
-  const timer = setTimeout(() => fail(new Error(`websocket handshake timed out after ${options.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms`)), options.timeoutMs ?? DEFAULT_TIMEOUT_MS)
-
-  socket.on('error', (error) => {
-    clearTimeout(timer)
+  const fail = (error) => {
+    abandoned = true
     report(error)
-  })
-  socket.on('close', () => {
-    clearTimeout(timer)
-    emitClose()
-  })
+    // Before the tunnel resolves there is no socket to destroy, and a caller waiting on
+    // `close` still has to be released.
+    if (socket === null || socket.destroyed) emitClose()
+    else socket.destroy()
+  }
 
-  socket.on('data', (chunk) => {
-    inbound = inbound.length === 0 ? chunk : Buffer.concat([inbound, chunk])
+  const timer = setTimeout(() => fail(new Error(`websocket handshake timed out after ${timeoutMs}ms`)), timeoutMs)
 
-    if (!handshakeDone) {
-      const end = inbound.indexOf('\r\n\r\n')
-      if (end < 0) return // the head has not fully arrived yet
-      const { statusLine, headers } = parseHead(inbound.subarray(0, end).toString('latin1'))
-      inbound = inbound.subarray(end + 4)
-
-      if (!/^HTTP\/1\.1 101/.test(statusLine)) {
-        clearTimeout(timer)
-        fail(new Error(`websocket upgrade refused: ${statusLine}`))
-        return
-      }
-      if (headers.get('sec-websocket-accept') !== expectedAccept) {
-        clearTimeout(timer)
-        fail(new Error('websocket handshake failed: bad Sec-WebSocket-Accept'))
-        return
-      }
-      handshakeDone = true
-      clearTimeout(timer)
-      // permessage-deflate is intentionally never negotiated.
-      emitter.compressed = false
-      emitter.emit('open')
-    }
-
-    for (;;) {
-      if (inbound.length < 2) return
-      const first = inbound[0]
-      const second = inbound[1]
-      const fin = (first & 0x80) !== 0
-      const opcode = first & 0x0f
-      const masked = (second & 0x80) !== 0
-      let length = second & 0x7f
-      let offset = 2
-
-      if (length === 126) {
-        if (inbound.length < offset + 2) return
-        length = inbound.readUInt16BE(offset)
-        offset += 2
-      } else if (length === 127) {
-        if (inbound.length < offset + 8) return
-        const big = inbound.readBigUInt64BE(offset)
-        offset += 8
-        if (big > BigInt(MAX_FRAME_BYTES)) {
-          fail(new Error(`websocket frame too large: ${big} bytes`))
-          return
-        }
-        length = Number(big)
-      }
-
-      let maskKey = null
-      if (masked) {
-        if (inbound.length < offset + 4) return
-        maskKey = inbound.subarray(offset, offset + 4)
-        offset += 4
-      }
-      if (inbound.length < offset + length) return
-
-      let payload = inbound.subarray(offset, offset + length)
-      if (maskKey) {
-        const unmasked = Buffer.allocUnsafe(length)
-        for (let index = 0; index < length; index += 1) unmasked[index] = payload[index] ^ maskKey[index % 4]
-        payload = unmasked
-      }
-      inbound = inbound.subarray(offset + length)
-
-      if (opcode === OPCODE.ping) {
-        socket.write(encodeFrame(OPCODE.pong, payload))
-        continue
-      }
-      if (opcode === OPCODE.pong) continue
-      if (opcode === OPCODE.close) {
-        if (!closing) socket.end(encodeFrame(OPCODE.close, Buffer.alloc(0)))
-        return
-      }
-
-      if (opcode === OPCODE.continuation) {
-        if (fragment === null) {
-          fail(new Error('websocket protocol error: continuation frame without a start frame'))
-          return
-        }
-        fragment.chunks.push(payload)
-        if (fin) {
-          const message = fragment.chunks.length === 1 ? fragment.chunks[0] : Buffer.concat(fragment.chunks)
-          emitter.emit(fragment.opcode === OPCODE.text ? 'text' : 'binary', message)
-          fragment = null
-        }
-        continue
-      }
-
-      if (opcode !== OPCODE.text && opcode !== OPCODE.binary) {
-        fail(new Error(`websocket protocol error: unsupported opcode 0x${opcode.toString(16)}`))
-        return
-      }
-      if (!fin) {
-        fragment = { opcode, chunks: [payload] }
-        continue
-      }
-      emitter.emit(opcode === OPCODE.text ? 'text' : 'binary', payload)
-    }
-  })
-
-  socket.on('secureConnect', () => {
+  const sendHandshake = () => {
     const lines = [
       `GET ${url.pathname}${url.search} HTTP/1.1`,
       `Host: ${url.host}`,
@@ -274,22 +185,165 @@ export function connect(options) {
     // No Sec-WebSocket-Extensions line: permessage-deflate is not implemented.
     for (const [name, value] of Object.entries(options.headers ?? {})) lines.push(`${name}: ${value}`)
     socket.write(`${lines.join('\r\n')}\r\n\r\n`)
-  })
+  }
+
+  /**
+   * Wire up a socket that is ready to carry the upgrade request.
+   * @param {import('node:tls').TLSSocket} ready - the socket.
+   * @param {boolean} secureAlreadyDone - true for a proxied socket, which has already completed TLS.
+   */
+  const attach = (ready, secureAlreadyDone) => {
+    socket = ready
+    socket.setNoDelay(true)
+
+    socket.on('error', (error) => {
+      clearTimeout(timer)
+      report(error)
+    })
+    socket.on('close', () => {
+      clearTimeout(timer)
+      emitClose()
+    })
+
+    socket.on('data', (chunk) => {
+      inbound = inbound.length === 0 ? chunk : Buffer.concat([inbound, chunk])
+
+      if (!handshakeDone) {
+        const end = inbound.indexOf('\r\n\r\n')
+        if (end < 0) return // the head has not fully arrived yet
+        const { statusLine, headers } = parseHead(inbound.subarray(0, end).toString('latin1'))
+        inbound = inbound.subarray(end + 4)
+
+        if (!/^HTTP\/1\.1 101/.test(statusLine)) {
+          clearTimeout(timer)
+          fail(new Error(`websocket upgrade refused: ${statusLine}`))
+          return
+        }
+        if (headers.get('sec-websocket-accept') !== expectedAccept) {
+          clearTimeout(timer)
+          fail(new Error('websocket handshake failed: bad Sec-WebSocket-Accept'))
+          return
+        }
+        handshakeDone = true
+        clearTimeout(timer)
+        // permessage-deflate is intentionally never negotiated.
+        emitter.compressed = false
+        emitter.emit('open')
+      }
+
+      for (;;) {
+        if (inbound.length < 2) return
+        const first = inbound[0]
+        const second = inbound[1]
+        const fin = (first & 0x80) !== 0
+        const opcode = first & 0x0f
+        const masked = (second & 0x80) !== 0
+        let length = second & 0x7f
+        let offset = 2
+
+        if (length === 126) {
+          if (inbound.length < offset + 2) return
+          length = inbound.readUInt16BE(offset)
+          offset += 2
+        } else if (length === 127) {
+          if (inbound.length < offset + 8) return
+          const big = inbound.readBigUInt64BE(offset)
+          offset += 8
+          if (big > BigInt(MAX_FRAME_BYTES)) {
+            fail(new Error(`websocket frame too large: ${big} bytes`))
+            return
+          }
+          length = Number(big)
+        }
+
+        let maskKey = null
+        if (masked) {
+          if (inbound.length < offset + 4) return
+          maskKey = inbound.subarray(offset, offset + 4)
+          offset += 4
+        }
+        if (inbound.length < offset + length) return
+
+        let payload = inbound.subarray(offset, offset + length)
+        if (maskKey) {
+          const unmasked = Buffer.allocUnsafe(length)
+          for (let index = 0; index < length; index += 1) unmasked[index] = payload[index] ^ maskKey[index % 4]
+          payload = unmasked
+        }
+        inbound = inbound.subarray(offset + length)
+
+        if (opcode === OPCODE.ping) {
+          socket.write(encodeFrame(OPCODE.pong, payload))
+          continue
+        }
+        if (opcode === OPCODE.pong) continue
+        if (opcode === OPCODE.close) {
+          if (!closing) socket.end(encodeFrame(OPCODE.close, Buffer.alloc(0)))
+          return
+        }
+
+        if (opcode === OPCODE.continuation) {
+          if (fragment === null) {
+            fail(new Error('websocket protocol error: continuation frame without a start frame'))
+            return
+          }
+          fragment.chunks.push(payload)
+          if (fin) {
+            const message = fragment.chunks.length === 1 ? fragment.chunks[0] : Buffer.concat(fragment.chunks)
+            emitter.emit(fragment.opcode === OPCODE.text ? 'text' : 'binary', message)
+            fragment = null
+          }
+          continue
+        }
+
+        if (opcode !== OPCODE.text && opcode !== OPCODE.binary) {
+          fail(new Error(`websocket protocol error: unsupported opcode 0x${opcode.toString(16)}`))
+          return
+        }
+        if (!fin) {
+          fragment = { opcode, chunks: [payload] }
+          continue
+        }
+        emitter.emit(opcode === OPCODE.text ? 'text' : 'binary', payload)
+      }
+    })
+
+    if (secureAlreadyDone) sendHandshake()
+    else socket.on('secureConnect', sendHandshake)
+  }
+
+  const proxy = systemProxy()
+  if (proxy === null) {
+    attach(tls.connect({ host: url.hostname, port, servername: url.hostname }), false)
+  } else {
+    connectThroughProxy(url, proxy, timeoutMs).then(
+      ({ socket: tunnelled }) => {
+        // The handshake timer may already have fired; a socket arriving after that is not
+        // wanted, and leaving it open would keep the process alive.
+        if (abandoned) {
+          tunnelled.destroy()
+          return
+        }
+        attach(tunnelled, true)
+      },
+      (error) => fail(error),
+    )
+  }
 
   /** Send one text message. @param {string|Buffer} payload - the message body. */
   emitter.send = (payload) => {
-    if (socket.destroyed) return
+    if (socket === null || socket.destroyed) return
     socket.write(encodeFrame(OPCODE.text, payload))
   }
   /** Send a close frame and end the stream. */
   emitter.close = () => {
-    if (socket.destroyed) return
+    if (socket === null || socket.destroyed) return
     closing = true
     socket.end(encodeFrame(OPCODE.close, Buffer.alloc(0)))
   }
   /** Tear the connection down immediately. */
   emitter.destroy = () => {
-    socket.destroy()
+    if (socket !== null) socket.destroy()
   }
   emitter.compressed = false
 

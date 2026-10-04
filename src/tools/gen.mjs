@@ -22,14 +22,6 @@ export const GEN_TOOL_NAME = 'video_gen'
 export function createGenTool(actions) {
   return defineFamilyTool({
     name: GEN_TOOL_NAME,
-    description:
-      'Generate footage or still images with ByteDance Seed on Volcengine Ark. NOTE: this is the only non-deterministic tool here — the same prompt produces a different result each time, and only a fixed seed makes it approximately reproducible. Video takes one to several minutes; an image takes about fifteen seconds and returns synchronously. Call "models" or "image_models" first to see which models this account can actually use.',
-    actionsHelp:
-      'models: list the Seedance video models visible to this account with their status (live / retiring / shut down) straight from the Ark model listing. Use it before generating video; model ids change and hard-coding one goes stale. ' +
-      'generate: submit one text-to-video or image-to-video task, poll it, and download the result to disk. Returns the local path, never a URL you would have to fetch yourself. ' +
-      'image_models: list the Seedream image models and their status the same way. ' +
-      'image: generate a still image from a prompt and download it. Synchronous, so it returns in seconds rather than minutes; use it for a missing shot, a thumbnail, or cover art. ' +
-      'Parameters are scoped per model and per mode, so an option that works on one model may be rejected on another — read the error, it names the offending field.',
     actions: ['models', 'generate', 'image_models', 'image'],
     extraProperties: {
       prompt: { type: 'string', description: 'generate / image: the creative direction. For image, describe the picture you want.' },

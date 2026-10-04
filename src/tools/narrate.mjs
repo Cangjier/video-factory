@@ -16,15 +16,6 @@ export function createNarrateTool(actions, locate) {
   return defineFamilyTool({
     name: NARRATE_TOOL_NAME,
     locate,
-    description:
-      'Narration and subtitle primitives: synthesize speech from text with per-word timings, turn those timings into subtitle cues, read or write SRT files, and transcribe existing audio or video through the host\'s local recogniser. The returned paths and style values go straight into plan.json.',
-    actionsHelp:
-      'synthesize: text -> MP3 plus per-word timings (no API key needed). Returns {audio, words, duration}. ' +
-      'to_cues: word timings -> subtitle cues, split on sentence-ending punctuation and wrapped at maxChars. ' +
-      'srt_write / srt_read: serialize or parse an .srt file. ' +
-      'layout: cue list + canvas -> burn-in style values (font size, margins, colours, outline) to put in plan.json subtitles. Pure computation. ' +
-      'transcribe: speech to text for an existing audio or video file, using the local recogniser — the way to learn what a video says. Fully offline once its model is downloaded. ' +
-      'Synthesize once, then re-run to_cues and layout as often as you like — they cost nothing.',
     actions: ['synthesize', 'to_cues', 'srt_write', 'srt_read', 'layout', 'transcribe'],
     extraProperties: {
       text: { type: 'string', description: 'synthesize: narration text inline. Give either text or textPath.' },

@@ -24,7 +24,7 @@ import { run } from '../src/core/ffmpeg.mjs'
 import { disposeMatteSession, matteImage, matteState, matteVideo } from '../src/core/matte.mjs'
 
 const state = matteState()
-const skip = state.available ? false : `没有安装抠图模型（video_env {action:"install_matte"}）：${state.reason}`
+const skip = state.available ? false : `没有安装抠图模型（video_setup {action:"install_matte"}）：${state.reason}`
 
 // The WASM session is a module-level singleton; release it so the test process can exit.
 after(() => {

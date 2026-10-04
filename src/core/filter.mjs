@@ -432,14 +432,35 @@ export function applyOverlays(fragment, overlays, context) {
 }
 
 /**
+ * The reference resolution libass lays an ASS script out against when the script does not
+ * declare its own. ffmpeg converts an SRT with exactly this default, which is the whole
+ * reason {@link subtitleStyle} has to convert anything.
+ */
+const ASS_SCRIPT_HEIGHT = 288
+
+/**
  * Build the ASS force_style value for burned-in subtitles.
- * @param {object} subtitles - the validated subtitle plan.
+ *
+ * `font_size`, `margin_v` and `outline` are canvas pixels, but an ASS `FontSize`, `MarginV`
+ * and `Outline` are in *script* units, and the SRT this rides on is converted at the default
+ * 384x288 script resolution. Passing a canvas value through unchanged therefore multiplies it
+ * by height/288 — 3.75x on a 1080p frame. Measured: `video_narrate {action:"layout"}` advises
+ * 78 px for a 1920x1080 canvas, and writing that straight through rendered ~250 px glyphs
+ * floating in the middle of the picture, because 78 script units is 292 canvas pixels.
+ *
+ * @param {object} subtitles - the validated subtitle plan, in canvas pixels.
+ * @param {{height?: number}} [canvas] - the output canvas, used to convert to script units.
  * @returns {string} the style string.
  */
-export function subtitleStyle(subtitles) {
+export function subtitleStyle(subtitles, canvas) {
+  const height = Number(canvas?.height) > 0 ? Number(canvas.height) : ASS_SCRIPT_HEIGHT
+  const toScript = ASS_SCRIPT_HEIGHT / height
+  const fontSize = Math.max(1, Math.round(subtitles.fontSize * toScript))
+  const marginV = Math.max(0, Math.round(subtitles.marginV * toScript))
+  const outline = Math.max(1, Math.round(subtitles.outline * toScript))
   return (
-    `FontName=Microsoft YaHei,FontSize=${subtitles.fontSize},` +
-    `MarginV=${subtitles.marginV},Outline=${subtitles.outline},` +
+    `FontName=Microsoft YaHei,FontSize=${fontSize},` +
+    `MarginV=${marginV},Outline=${outline},` +
     `OutlineColour=${toAssColor(subtitles.outlineColor)},` +
     `PrimaryColour=${toAssColor(subtitles.primaryColor)},` +
     'BorderStyle=1,Shadow=0'

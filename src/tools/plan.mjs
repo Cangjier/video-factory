@@ -15,14 +15,6 @@ export const PLAN_TOOL_NAME = 'video_plan'
 export function createPlanTool(actions) {
   return defineFamilyTool({
     name: PLAN_TOOL_NAME,
-    description:
-      'Validate and inspect an edit plan (plan.json) without rendering it. You write the plan; this tool only tells you whether it is legal, how long it will run, and what is objectively wrong with it.',
-    actionsHelp:
-      'check: structural validation plus referenced-file existence, unique scene ids, and value ranges, reported as errors and warnings with the offending field named. ' +
-      'duration: exact timeline length including transition overlap, plus the effective overlap at each boundary. ' +
-      'fields: the full plan.json field reference. ' +
-      'diagnose: objective problems only — a referenced file that does not exist, a still with motion "none", a transition longer than half its scene, a portrait plan full of landscape stills, a total length that misses the narration by a wide margin. ' +
-      'It reports facts, never taste: it will not suggest reordering or re-timing.',
     actions: ['check', 'duration', 'fields', 'diagnose'],
     extraProperties: {
       plan: { type: 'string', description: 'Path to plan.json. Give either plan or planData.' },

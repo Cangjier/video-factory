@@ -9,24 +9,37 @@ DSH 决定做什么  →  video_* 工具确定性地执行
 **插件只提供确定性工具，流程与创作决策全部归 DSH。** 没有"一键出片"命令，因为镜头顺序、节奏、时长、选哪张图——这些都是创作判断，不该由工具替你决定。
 
 - 工具清单、契约、设计取舍：[docs/插件设计规格.md](docs/插件设计规格.md)
+- **功能全解（12 工具 / 58 action 索引 + core 模块地图 + CLI 清单）**：[docs/功能全解.md](docs/功能全解.md)
+- **工具重组方案（前后对照、成本账、审计发现的 18 条缺陷）**：[docs/工具重组方案.md](docs/工具重组方案.md)
+- 声音工具（创建/识别/质量/录制/噪音）参考：[docs/声音工具.md](docs/声音工具.md)
+- 成片验收套件（28 条确定性用例）：[docs/质量检查.md](docs/质量检查.md)
+- **桌面自动化已拆成独立插件**：`dsh-computer-use`（工具族 `computer_*`）
+- **读图取字已拆成独立插件**：[dsh-ocr](https://github.com/Cangjier/dsh-ocr)（工具族 `text_*`）——本插件不再包含 OCR 引擎、读字取坐标与字幕回读
 
 ---
 
 ## 工具
 
-插件注册 7 个工具，共 36 个 action。每个工具的 schema 每轮都会进入模型上下文，所以按操作族分组、族内用 `action` 分派，而不是摊成三十多个独立工具。
+插件注册 **12 个工具、53 个 action**（不含已迁出的 `dsh-ocr`），分两层：**常驻 schema 只放"选择所需"**（做什么、必填什么、最易犯的错），**完整细节按需读** `video_guide`——参数必填与默认、返回值、耗时、陷阱、示例全部可从 guide 取回，不必常驻。同一份散文只有一个来源（`src/tools/registry.mjs`），schema 与 guide 都由它派生，**不可能互相矛盾**。
 
 | 工具 | action | 做什么 |
 | --- | --- | --- |
-| `video_env` | `probe` `presets` `scan` `install_ffmpeg` `install_ocr` `install_audio` `install_matte` | 环境自检、画布预设、素材盘点、装 ffmpeg / OCR / 音频模型 / 抠像模型 |
+| `video_guide` | `overview` `playbook` `rules` `tool` `action` | **按需的完整能力目录**：每个 action 的参数必填与默认、返回值、耗时、陷阱、示例、相邻动作；10 组全局规则与成本矩阵；8 条端到端流程 |
+| `video_env` | `probe` `presets` `scan` | 环境自检、画布预设、素材盘点（只读事实） |
+| `video_setup` | `install_ffmpeg` `install_audio` `install_matte` | 供应：装/卸 ffmpeg、YAMNet、U²-Net |
 | `video_narrate` | `synthesize` `to_cues` `srt_write` `srt_read` `layout` `transcribe` | 文案→配音+逐词时间戳；断句；SRT 读写；字幕排版；**语音转文字** |
 | `video_plan` | `check` `duration` `fields` `diagnose` | 计划校验、精确时长、字段速查、客观问题诊断 |
 | `video_render` | `scene` `assemble` `finalize` `deliver` `build` | 单镜头、拼接、合成、交付、整链 |
-| `video_inspect` | `verify` `media` `ocr` `find_text` `ocr_status` | 成片验收、媒体元信息、**读图取字（带坐标）**、**定位文字** |
+| `video_inspect` | `verify` `media` | 成片验收、媒体元信息 |
 | `video_gen` | `models` `generate` `image_models` `image` | 方舟模型发现；**文生视频**；**文生图** |
 | `video_analyze` | `sample_frames` `audio_events` `audio_status` `matte` `matte_status` | **自适应抽帧**、**音频事件识别**、**抠像** |
+| `video_audio_build` | `tone` `assemble` `restore` `record` | **造与修声音**：参数全指定的测试信号、采样级拼轨、显式修复链、定时录音 |
+| `video_audio_measure` | `identify` `speech_map` `loudness` `levels` `integrity` `sync` `noise` `devices` | **量声音**：声明 vs 实际、语音/静音图、EBU R128、削波与直流、帧链完整性审计与修复、双轨偏移与漂移、噪声底与工频交流声、采集设备枚举 |
+| `video_qc` | `cases` `check` `structure` `picture` | **成片验收套件**：28 条确定性用例（容器/画面/声音/旁白时序/交付物），逐条给出期望、实测、证据与 pass/fail/skip；用例文件可调阈值与级别；容器事实、画面事实可单独查 |
 
-**先说清楚边界**：`scan` 只盘点不取舍（重复图**标注**而非删除）；`check` 只判断不修改；`diagnose` 只报客观事实（"静止图没给 motion"），不报品味（"这个镜头该放前面"）；`sample_frames` 报"哪一帧动了、动了多少"和选中它的理由，不报"这个运镜好不好"；`audio_events` 报"这一段是什么声音"，不报"配乐合不合适"；`matte` 报"这是主体"，不报"抠得好不好"。`video_gen` 是**唯一不满足"同输入同输出"**的工具——同 prompt 不同结果，它是执行器不是确定性算子。
+**先说清楚边界**：`scan` 只盘点不取舍（重复图**标注**而非删除）；`check` 只判断不修改；`diagnose` 只报客观事实（"静止图没给 motion"），不报品味（"这个镜头该放前面"）；`sample_frames` 报"哪一帧动了、动了多少"和选中它的理由，不报"这个运镜好不好"；`audio_events` 报"这一段是什么声音"，不报"配乐合不合适"；`matte` 报"这是主体"，不报"抠得好不好"；`video_audio_build` / `video_audio_measure` 的每个 action 也只报数字或写出参数完全指定的文件——它不会说"这段录音能用"；`video_qc` 的判断全部来自 plan、用例文件或文档里写明的默认值，它给的是 `expected` vs `actual` 和通过与否，**期望值构不出来时是 `skip` 加原因，不是通过**。`video_gen` 是**唯一不满足"同输入同输出"**的工具——同 prompt 不同结果，它是执行器不是确定性算子。
+
+**读图取字不在本插件里了**：`video_inspect` 曾经有 `ocr` / `find_text` / `ocr_status`，`video_setup` 曾经有 `install_ocr`，`video_qc` 曾经有 `subtitle_ocr` 与"烧录字幕可被 OCR 读回"用例。它们连同 OCR 引擎、WinRT 回退、坐标回算与 `vendor/ocr/` 一起搬到了 **`dsh-ocr`**（工具族 `text_*`）。理由很直接：识别文字需要引擎、安装路径和一套自己的坐标空间，而这些跟"把素材渲染成成片"没有关系。装 `dsh-ocr` 后：读字 `text_read {action:"read"}`，定位 `text_find {action:"find"}`，装引擎 `text_setup {action:"install"}`，字幕回读 `text_read {action:"verify"}`。
 
 ---
 
@@ -45,42 +58,37 @@ DSH 决定做什么  →  video_* 工具确定性地执行
 
 **修改插件源码后需要重启 DSH**：Node 按路径缓存 ES 模块，重新启用插件不会重新导入模块。
 
+**读图取字单独装**：`dsh-ocr` 是另一个 bundle（[Cangjier/dsh-ocr](https://github.com/Cangjier/dsh-ocr)），同样用插件管理器装即可。两者互不依赖：只装本插件就没有 `text_*` 工具，只装 `dsh-ocr` 也能读字（它会自己找 ffmpeg，找不到就只读静态图）。
+
 ### ffmpeg
 
 仓库自带 `vendor/ffmpeg/bin/`（BtbN GPL 静态构建，含 libx264/libx265/libass）。换机器时：
 
 ```
-video_env {action: "install_ffmpeg"}
+video_setup {action: "install_ffmpeg"}
 ```
 
 或用命令行：`node src/bin/vf.mjs install`。发现顺序是 `VIDEO_FACTORY_FFMPEG` 环境变量 → `vendor/ffmpeg/bin/` → `PATH`。
 
-### 离线 OCR（可选，但强烈建议装）
+### 读图取字：已迁到 `dsh-ocr`（独立插件）
 
-`video_inspect {action:"ocr"}` 读图片/视频帧里的文字，每行都带**像素框**和置信度；`find_text` 反过来，
-给一段文字，返回它在图上的**中心点**（可直接点）。两个场景一套代码：读数据、找控件。
+本插件**不再读文字**。`video_inspect` 的 `ocr` / `find_text` / `ocr_status`、`video_setup` 的 `install_ocr`、
+`video_qc` 的 `subtitle_ocr` 与"烧录字幕可被 OCR 读回"用例，连同 OCR 引擎、WinRT 回退、裁剪放大与坐标回算、
+`vendor/ocr/`，全部搬到了同目录的 **`dsh-ocr`**（工具族 `text_*`）。
 
-不装引擎也能用——退回 Windows 自带的 `Windows.Media.Ocr`，**零安装但读不准小字**：
-实测它把 `TypeScript` 读成 `TvpeScript`、`自动化任务` 读成 `自 动 化 亻 壬 务`。装上引擎后同样一张图读对。
+拆开的理由不是"功能太多"，而是**依赖方向不对**：识别文字需要引擎、引擎安装路径、一套自己的坐标空间
+（裁剪偏移 + 放大倍数要回算到调用者图像的像素系），而渲染成片一件都不需要。把它们绑在一起，
+只读一张截图也要拖上整个视频工具链。
 
-```
-video_env {action: "install_ocr", prune: true}          # 装默认引擎（RapidOCR/PP-OCRv4，MIT）
-video_env {action: "install_ocr"}                        # 用安装时的缓存包
-```
-
-| 项 | 说明 |
+| 要做的事 | 现在用 |
 | --- | --- |
-| 引擎 | `rapidocr-json`（默认）：ONNX Runtime + PP-OCRv4 简中，**MIT**，不要求 AVX。解包约 95 MB，`prune: true` 后约 44 MB |
-| 备选 | `paddleocr-ppocrv5`：第三方 Paddle Inference 构建 + PP-OCRv5，个别小字更准，但**同一张图实测慢约 9 倍**（15.9 s vs 1.77 s），且要求 AVX |
-| 实测速度 | 整屏 1200x1013：约 1.8–2.2 s / 35 行；**只截一小块再放大：约 0.2 s**。所以找控件时给 `region` |
-| 小字技巧 | `scale: "auto"` 会把小图（或小 `region` 裁片）放大到长边约 1000px——11px 的字不放大基本读不出 |
-| 校验 | 包按 **sha256 硬校验**后才解包；引擎以常驻子进程运行，空闲 120 s 自动退出，释放约 500 MB |
-| 网络慢 | `install_ocr {archive: "D:/下载/xxx.7z"}` 用本地包（sha256 照样校验）。实测 GitHub CDN 会把这次下载限到约 20 KB/s |
-| 云端 | **不做**。视觉模型给不出逐行文字的像素框；要"看懂画面"请让 DSH 自己看图 |
+| 读出图上的文字（带像素框与置信度） | `text_read {action:"read", target:"截图.png", region:"600,100,620,56", scale:"auto"}` |
+| 按文字找位置（返回可点的中心点） | `text_find {action:"find", target:"截图.png", needle:"始终安装"}` |
+| 装/查/删离线 OCR 引擎 | `text_setup {action:"install"}` / `{action:"status"}` / `{action:"remove"}` |
+| 回读烧录字幕，和 SRT 逐条比对 | `text_read {action:"verify", target:"out/final.mp4", srt:"out/narration/voiceover.srt"}` |
 
-命令行：`node src/bin/vf.mjs install-ocr --prune`；读图：`node src/bin/vf.mjs ocr <图片> --region 600,100,620,56 --scale auto --find "始终安装"`。
-
-设计与实测数据见 [docs/插件设计规格.md](docs/插件设计规格.md) §13。
+安装：仓库在 [Cangjier/dsh-ocr](https://github.com/Cangjier/dsh-ocr)（本机同目录克隆 `../dsh-ocr` 即可），装法与插件管理方式同本插件。
+**没装 `dsh-ocr` 时本插件一切照常**——它只是不再有读字能力，渲染、配音、字幕、验收都不受影响。
 
 ### 云端生成（可选）
 
@@ -112,7 +120,7 @@ video_env {action: "install_ocr"}                        # 用安装时的缓存
 **转录解决"说了什么话"，这一项解决"这是什么声音"**——是背景音乐、是环境噪音、还是静音。剪片子卡点要用的是后者，而它以前完全读不出来。
 
 ```
-video_env {action: "install_audio"}        # 装 YAMNet + WASM 运行时，约 28 MB
+video_setup {action: "install_audio"}        # 装 YAMNet + WASM 运行时，约 28 MB
 video_analyze {action: "audio_events", target: "out/final.mp4"}
 ```
 
@@ -136,7 +144,7 @@ video_analyze {action: "audio_events", target: "out/final.mp4"}
 | 校验 | 模型按 **sha256**、运行时按 npm **sha512 integrity** 硬校验后才落盘；`install_audio` 幂等，已装且校验通过则跳过 |
 | 网络 | 自动走系统代理（见"踩过的坑"）。如果托管方完全不可达：`install_audio {archive:"D:/模型"}` 指向一个含 `yamnet.onnx` + `yamnet_class_map.csv` 的目录，或直接指向 `.onnx` 文件——**sha256 照样硬校验** |
 | 失败安全 | 模型先落到临时目录、校验通过才移入。下载中断**不会**破坏已装好的树（实测：两次 `fetch failed` 后 128/128 校验仍全绿） |
-| 删除 | `video_env {action:"install_audio", remove: true}` |
+| 删除 | `video_setup {action:"install_audio", remove: true}`（**会删掉整棵 `vendor/audio`，连带废掉抠像的共享运行时**） |
 | 不做 | **不建议商用前跳过来源核对**。模型来源链见下 |
 
 **为什么不用原生 `onnxruntime-node`**：它解包 **245.7 MB**（三平台 × 两架构的原生库），并且会打破本插件"纯 ESM、无依赖边"的性质。实测两条路径在同一个窗上**分数一致到小数点后六位**（0.977061 vs 0.977062），所以选了小的。
@@ -215,7 +223,8 @@ video_analyze {action: "sample_frames", target: "out/final.mp4", extract: true}
 绿幕用上面的 `chroma_key`，**免费且精确**。背景是任意照片或运动镜头时，才需要学习式抠像。
 
 ```
-video_env {action: "install_matte"}                              # 4.36 MB
+video_setup {action: "install_audio"}                            # 先装共享运行时
+video_setup {action: "install_matte"}                            # 4.36 MB
 video_analyze {action: "matte", target: "素材/人物.jpg"}          # 输出透明背景 PNG
 video_analyze {action: "matte_status", duration: 20}             # 先问要花多少时间
 ```
@@ -228,7 +237,7 @@ video_analyze {action: "matte_status", duration: 20}             # 先问要花�
 | 几何 | 输入固定 `[1,3,320,320]`；输出 7 个 `[1,1,320,320]`，**首位是融合预测** |
 | 输出 | 带 alpha 的 PNG；遮罩被放大回原尺寸，边缘靠 `feather` 平滑 |
 | 校验 | sha256 硬校验；`modelArchive` 可指向本地 `.onnx`；幂等 |
-| 删除 | `video_env {action:"install_matte", remove: true}`（**保留共享运行时**，不会顺手弄坏音频检测） |
+| 删除 | `video_setup {action:"install_matte", remove: true}`（**保留共享运行时**，不会顺手弄坏音频检测） |
 
 ### 视频抠像：`mask_fps` 由你（或 DSH）决定
 
@@ -294,6 +303,7 @@ video_analyze {action: "matte_status", duration: 20}             # 先问要花�
 | 看单张图 | ✅ 模型原生支持（`read_image`） |
 | 找"哪一刻值得看" | ✅ `video_analyze {action:"sample_frames"}` —— 剪切点与运动自动选中，带理由与分值 |
 | 抽帧落盘再逐张看图 | ✅ `sample_frames {extract:true}` 写出 JPEG，路径直接可读 |
+| 读出画面上的文字与坐标 | ✅ 独立插件 `dsh-ocr`：`text_read {action:"read"}` / `text_find {action:"find"}` |
 | 语音转文字 | ✅ 启用语音 bundle 后，`video_narrate {action:"transcribe"}` |
 | 识别音乐 / 环境音 / 音效 | ✅ `video_analyze {action:"audio_events"}`（需先 `install_audio`） |
 | 抠出主体（绿幕） | ✅ `plan.json` 的 `chroma_key`，零模型零成本 |
@@ -319,8 +329,6 @@ node src/bin/vf.mjs narrate --text script.txt --out narration
 node src/bin/vf.mjs render --plan examples/demo/plan.json --all --out out
 node src/bin/vf.mjs render --plan plan.json --scene s03 --force   # 只重渲染一个镜头
 node src/bin/vf.mjs make-test-material --dir tmp/material --scenes 6
-node src/bin/vf.mjs install-ocr --prune                            # 装离线 OCR 引擎
-node src/bin/vf.mjs ocr 截图.png --region 600,100,620,56 --scale auto --find "始终安装"
 node src/bin/vf.mjs install-audio                                  # 装音频事件模型 + WASM 运行时
 node src/bin/vf.mjs frames out/final.mp4 --probe-fps 6             # 自适应抽帧
 node src/bin/vf.mjs audio out/final.mp4 --top-k 2 --min-score 0.2   # 音频事件识别
@@ -328,10 +336,13 @@ node src/bin/vf.mjs install-matte                                  # 装抠像�
 node src/bin/vf.mjs matte 素材/人物.jpg --feather 1                 # 抠出主体，输出透明 PNG
 ```
 
+读字没有命令行入口——它与本插件无关了。`dsh-ocr` 自己带 CLI：
+`node ../dsh-ocr/src/bin/ocr.mjs read 截图.png --region 600,100,620,56 --scale auto --find "始终安装"`。
+
 ## 端到端验证
 
 ```powershell
-node --test "tests/*.test.mjs"                                    # 214 个离线用例
+node --test "tests/*.test.mjs"                                    # 286 个离线用例
 node src/bin/vf.mjs render --plan examples/demo/plan.json --all --out examples/demo/out
 node src/bin/vf.mjs probe examples/demo/out/final.mp4
 ```
@@ -379,10 +390,11 @@ index.mjs              插件入口：apply / inject / 工具注册
 src/tools/*.mjs        工具 schema 与 action 实现（唯一知道 DSH 存在的层）
 src/core/*.mjs         确定性内核：纯 ESM、零第三方依赖、可离线单测
 vendor/ffmpeg/         静态 ffmpeg 构建
-vendor/ocr/            离线 OCR 引擎（可选；装之前 OCR 走 Windows 自带识别）
 vendor/audio/          YAMNet 模型 + WASM 推理运行时（可选；装之前 audio_events 不可用）
 vendor/matte/          U²-Net 抠像模型（可选；运行时与 vendor/audio 共用，不重复下载）
 ```
+
+读图取字的引擎目录 `vendor/ocr/` 已随能力一起搬到 `dsh-ocr`。
 
 **内核不依赖 DSH**，所以"确定性"可离线证明。渲染分四阶段，每阶段独立可调、独立缓存：
 
@@ -413,14 +425,20 @@ vendor/matte/          U²-Net 抠像模型（可选；运行时与 vendor/audio
 | `zoompan` 整数栅格 | 静止图运动有可见抖动 | 先 4 倍超采样再 `zoompan` |
 | 感知哈希分不清渐变 | 合成渐变图会被互相判为重复 | 已知限制，用真实照片测去重 |
 | Windows 260 字符路径 | 超限报错极具误导性 | 提前检查路径预算（默认 200） |
-| Windows 没有能解 `.7z` 的工具 | `tar.exe` 报 `LZMA codec is unsupported`，7-Zip 通常没装 | 安装器顺带取官方 `7zr.exe`（0.6 MB）放进 `vendor/ocr/tools/` |
-| OCR 坐标乘错方向 | 放大图的框要**除以**倍数、**再加**裁剪偏移；反了就是平方级偏移，点击落到别处 | 在一处换算、单测覆盖旋转框与偏移+缩放组合 |
-| 常驻 OCR 引擎拖住进程 | 短命脚本会等空闲计时器（120 s）才退出 | 插件卸载时 `disposeOcrSessions()`，测试与 CLI 显式释放 |
+| Windows 没有能解 `.7z` 的工具 | `tar.exe` 报 `LZMA codec is unsupported`，7-Zip 通常没装 | 安装器顺带取官方 `7zr.exe`（0.6 MB）解包。这条教训随 OCR 引擎一起搬到了 `dsh-ocr` |
+| OCR 坐标乘错方向 | 放大图的框要**除以**倍数、**再加**裁剪偏移；反了就是平方级偏移，点击落到别处 | 在一处换算、单测覆盖旋转框与偏移+缩放组合。现属 `dsh-ocr` |
+| 常驻 OCR 引擎拖住进程 | 短命脚本会等空闲计时器（120 s）才退出 | 插件卸载时释放会话，测试与 CLI 显式释放。现属 `dsh-ocr` |
 | **系统代理对 Node 不可见** | `install_*` 从插件里报 `fetch failed`，但同一个 URL 在 PowerShell 里 **1.4 秒就取到**。Node 的 `fetch` 既不读 Windows 注册表代理，也不认 `HTTPS_PROXY`（Node 24 实测：设了变量、加了 `NODE_USE_ENV_PROXY=1`，仍然直连超时）。而 `Invoke-WebRequest`、浏览器、其它 Windows 程序都走注册表代理 | 自己读注册表 `ProxyEnable`/`ProxyServer`，用 `http CONNECT` + `tls` 建隧道；`undici` 在 Node 24 里**不可导入**，所以只能用内置模块手写 |
 | 代理下漏掉重定向 | HF 的 `/resolve/` 返回 **307/302** 跳 CDN。第一版 `httpFetch` 不跟重定向，于是把 278 字节的 "Temporary Redirect" 页面当成模型下载并去校验哈希 | 跟随重定向（上限 8 跳），并在每跳后排空响应体 |
 | **静音时间线让 `loudnorm` 产出 NaN** | 没有配音也没有音乐的 plan 在最后一步失败：`[aac] Input contains (near) NaN/+-Inf`。报错只说编码器，**完全没提响度**，靠逐段二分才定位到 `loudnorm`。此前**任何空音频块的 plan 都渲染不出成片** | 静音源跳过 `loudnorm`（静音没有响度可归一），只固定编码器要的采样格式。回归测试 `tests/finalize.test.mjs`（已回退验证过它真的会失败） |
 | **`lavfi` 源默认无限长** | 抠像背景输入不加 `-t` 时 `overlay` 无休止产帧；画面被输出 `-t` 截住而音频耗尽，又死在 AAC 编码器上，报的还是 NaN | 背景输入按镜头时长加 `-t` |
 | **`-v error` 把测量一起静音** | `signalstats` / `metadata=print` 走日志系统，`-v error` 下 `spawnSync` 拿回空字符串，看起来像"没有数据" | 需要测量时用 `-v info` |
+| **语音合成漏掉了代理** | `video_narrate {action:"synthesize"}` 报 `ECONNRESET`，而**同一台机器、同一个进程**里 `install_*` 下载一切正常——"装了代理就只剩配音不可用"。代理只被 `install.mjs` 学会过一次，`ws.mjs` 建连用的还是裸 `tls.connect` | 代理逻辑抽成 `core/proxy.mjs`（`install.mjs` 原样再导出，调用方不受影响），`ws.mjs` 建 socket 前先问 `systemProxy()`，有代理就走 CONNECT 隧道。`connect()` 仍同步返回 emitter，所以 `tts.mjs` 一行没改。回归测试 `tests/proxy.test.mjs` 用**本地假代理断言真正到达的 `CONNECT` 行**，不依赖公网 |
+| **edge-tts 音频里嵌了 CRLF，丢了 20%** | 逐段配音拼进视频后"生涩、不连贯、不清晰、不协调"，而且整条音轨比时码短约 3 秒、**最后一句没有声音**（字幕照旧在走）。真因不在服务端音质：服务端每条 `Path:audio` 消息是 `[2字节 headerLength][头部][\r\n][音频]`，客户端按 `headerLength` 切片，把这 2 字节留在了文件里——每 720 字节（5 个 MP3 帧）一个 2 字节缺口，解码器每个缺口报废一帧。逐帧扫描：`breakCount=102`、`gapHistogram={2:102}`、缺口字节恒为 `0d0a`；解码 12.250 s 的文件只解出 9.792 s | `tts.mjs` 不再按 `headerLength` 切片，改为**在声明长度两侧找 MPEG 同步字**（`audioBodyOffset`）：两种 framing 都对，格式变了也不会再错。`video_audio_measure {action:"integrity"}` 逐帧报缺口与字节，`repair:true` 只删帧间窄缺口、原文件不改写；测试用真实 libmp3lame 编码再注入 CRLF，断言"检测 → 解码确认损失 → 修复回原字节" |
+| **ffprobe 会把某些 WAV 误判成 MPEG-TS** | 48 kHz 单声道、数据恰好长得像 TS 同步字节的 WAV：`ffprobe` 与 `ffmpeg` 自动探测都报 `End of file` 退出，文件其实完全正常（`-f wav` 一指定就能读） | `describeAudio()` 先试 ffprobe、失败改读 ffmpeg 的输入报告；`runAudio()` / `decodePcm()` 失败时按**文件头**（RIFF/WAVE、ID3、`0xFFEx`、ftyp、fLaC…）显式指定 `-f` 重试一次，并在结果里标出 `answeredBy` / `forcedFormat`。单测覆盖文件头识别与 ffmpeg 输入报告解析 |
+| **ffmpeg 的 `sine` 源比满刻度低约 18 dB** | 用 `sine=frequency=..` 生成"−6 dBFS"的信号，实测峰值 −24 dBFS，标称电平全是假的 | 正弦与扫频改用 `aevalsrc`（按构造满刻度），`levelDbfs` 才成立；端到端测试断言 −6 dBFS 的正弦峰值误差 < 0.05 dB |
+| **`astats` 的统计走日志系统** | `-v error` 下 `Number of samples` / `Peak level dB` 一行都不打印，看起来像"这个文件没有统计" | 所有统计读取统一 `-v info -nostats`（与上面 `signalstats` 是同一条教训的第二次） |
+| **毫秒级 `adelay` 拼不出精确时间轴** | 十几段逐段合成再 `adelay` 拼接，每段差几十个采样点，累计成可听见的偏移 | `assemble` 用 `atrim=start_sample/end_sample` + `concat` + `apad=whole_len`，位置就是采样点编号，写完再解码比对采样数（`verification.exact`） |
 
 完整清单见 `docs/插件设计规格.md` §5.3 与 §12.1（后者的教训：**能用纯函数离线验证的，先在本地测到全绿再打真实服务**）。
 

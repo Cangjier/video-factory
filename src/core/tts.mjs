@@ -147,6 +147,40 @@ function splitHeaders(buffer, headerLength) {
 }
 
 /**
+ * Work out where the MP3 bytes start inside one binary `Path:audio` message.
+ *
+ * The message is `[2-byte headerLength][header text][audio]`, with the header text ending in
+ * a CRLF separator. Whether `headerLength` counts that separator has not been stable: when it
+ * does not (as the service has sent it since 2026-10-04), slicing at `headerLength` leaves the
+ * two separator bytes glued to the front of every chunk. Five frames later the next chunk adds
+ * two more, so the file gains a CRLF every 720 bytes and a decoder drops one frame per gap —
+ * twenty percent of the audio, silently, and the track ends up shorter than its own word
+ * timings.
+ *
+ * The fix is not "+2", which would break again the next time the framing moves: the body is
+ * found where the MPEG sync word actually is, allowing either side of the declared length. A
+ * format without an MPEG sync word falls back to the declared length, which is the old
+ * behaviour and is correct for a payload that carries no separator.
+ *
+ * @param {Buffer} payload - the whole binary message.
+ * @param {number} headerLength - the length the message declares for its header.
+ * @returns {number} the offset of the first audio byte.
+ */
+export function audioBodyOffset(payload, headerLength) {
+  const from = Math.max(0, headerLength - 4)
+  const to = Math.min(payload.length - 1, headerLength + 16)
+  for (let at = from; at < to; at += 1) {
+    // An MPEG audio frame header: eleven set bits, then a version and a layer that exist.
+    if (payload[at] !== 0xff || (payload[at + 1] & 0xe0) !== 0xe0) continue
+    const version = (payload[at + 1] >> 3) & 3
+    const layer = (payload[at + 1] >> 1) & 3
+    if (version === 1 || layer === 0) continue
+    return at
+  }
+  return headerLength
+}
+
+/**
  * Read the word boundaries out of one `audio.metadata` body.
  *
  * The shape is not the obvious one: `Data.text` is itself an object and the spoken
@@ -290,12 +324,14 @@ export async function synthesize(input) {
 
       socket.on('binary', (payload) => {
         if (payload.length < 2) return
-        // The first two bytes are a big-endian header length; `Path:audio` frames
-        // after it are the MP3 stream.
+        // The first two bytes are a big-endian header length; `Path:audio` frames after it are
+        // the MP3 stream. The body starts at the frame sync, not necessarily at the declared
+        // length: see {@link audioBodyOffset}.
         const headerLength = payload.readUInt16BE(0)
         if (headerLength > payload.length) return
-        const { headers: frameHeaders, body } = splitHeaders(payload, headerLength)
+        const { headers: frameHeaders } = splitHeaders(payload, headerLength)
         if (frameHeaders.get('path') !== 'audio') return
+        const body = payload.subarray(audioBodyOffset(payload, headerLength))
         if (body.length > 0) chunks.push(body)
       })
     })
