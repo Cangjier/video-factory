@@ -16,8 +16,6 @@ import { join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { capabilitiesOf, resolveBinary, versionOf, vendoredBuild } from '../core/env.mjs'
 import { installFfmpeg, vendoredState } from '../core/install.mjs'
-import { installOcr, ocrInstallState, removeOcr } from '../core/ocr-install.mjs'
-import { findLines, ocrReport, parseRegion, readText } from '../core/ocr.mjs'
 import { sampleFrames } from '../core/sampling.mjs'
 import { audioEventState, detectAudioEvents } from '../core/audio-events.mjs'
 import { installAudio, removeAudio, verifyInstalledAudio } from '../core/audio-install.mjs'
@@ -70,7 +68,6 @@ const COMMANDS = {
       ffmpeg: ffmpeg === null ? { found: false } : { found: true, path: ffmpeg },
       ffprobe: ffprobe === null ? { found: false } : { found: true, path: ffprobe },
       vendored: vendoredBuild(),
-      ocr: ocrReport({}),
       audio: audioEventState(),
       matte: matteState(),
       arkKeyPresent: typeof process.env.ARK_API_KEY === 'string' && process.env.ARK_API_KEY !== '',
@@ -101,54 +98,6 @@ const COMMANDS = {
     })
     emit({ ...result, state: vendoredState() })
     return 0
-  },
-
-  /** Install, or remove, an offline OCR engine. */
-  async 'install-ocr'(options) {
-    if (options.remove === true) {
-      const result = removeOcr(options.source)
-      emit({ ...result, state: ocrInstallState() })
-      return 0
-    }
-    const result = await installOcr({
-      source: options.source,
-      force: options.force === true,
-      prune: options.prune === true,
-      archive: options.archive,
-      onProgress: (message) => console.error(message),
-    })
-    emit({ ...result, state: ocrInstallState() })
-    return 0
-  },
-
-  /** Read text off an image or a video, and optionally locate a string in it. */
-  async ocr(options) {
-    const target = options.paths?.[0]
-    if (target === undefined) throw new Error('ocr: <文件> is required')
-    const config = { ocr: { defaultEngine: options.engine ?? 'auto' } }
-    const read = await readText(resolve(target), {
-      config,
-      engine: options.engine,
-      region: parseRegion(options.region),
-      scale: options.scale === undefined ? undefined : options.scale === 'auto' ? 'auto' : Number(options.scale),
-      language: options.language,
-      maxSideLen: options['max-side'] === undefined ? undefined : Number(options['max-side']),
-      frames: options.frames === undefined ? undefined : Number(options.frames),
-      onLog: (message) => console.error(message),
-    })
-    const matches = options.find === undefined ? null : findLines(read.lines, [options.find], { match: options.match })
-    if (options.json === true) emit({ ...read, matches })
-    else {
-      console.log(`引擎 ${read.engine}，${read.lines.length} 行，${read.elapsedMs} ms`)
-      for (const line of read.lines) {
-        console.log(`  ${String(line.score ?? '-').padEnd(6)} [${line.x},${line.y} ${line.width}x${line.height}] ${line.text}`)
-      }
-      if (matches !== null) {
-        console.log(`\n找到 ${matches.length} 处 "${options.find}"：`)
-        for (const match of matches) console.log(`  ${match.center.x},${match.center.y}  ${match.text}`)
-      }
-    }
-    return options.find === undefined || matches.length > 0 ? 0 : 1
   },
 
   /** Install, or remove, the audio event detection model and runtime. */
@@ -430,12 +379,8 @@ async function main() {
 用法：node src/bin/vf.mjs <命令> [选项]
 
 命令：
-  doctor                             检查 ffmpeg / ffprobe、OCR 引擎与云端 Key
+  doctor                             检查 ffmpeg / ffprobe、模型组件与云端 Key
   install [--force]                  把 ffmpeg 装进 vendor/
-  install-ocr [--source <id>] [--archive <本地.7z>] [--prune] [--force] [--remove]
-                                     把离线 OCR 引擎装进 vendor/ocr/
-  ocr <文件> [--region x,y,w,h] [--scale auto|<倍数>] [--engine auto|local|winrt]
-             [--find "<文字>"] [--json]   读图片/视频里的文字，可定位并给出点击坐标
   install-audio [--force] [--remove]   把 YAMNet 模型与 WASM 运行时装进 vendor/audio/
   frames <视频> [--strategy adaptive|uniform|scene_change|motion_aware]
              [--probe-fps 4] [--scene-threshold 30] [--motion-threshold 5] [--json]
@@ -488,14 +433,7 @@ async function main() {
       base: { type: 'string' },
       source: { type: 'string' },
       archive: { type: 'string' },
-      region: { type: 'string' },
-      scale: { type: 'string' },
-      engine: { type: 'string' },
-      language: { type: 'string' },
-      find: { type: 'string' },
-      match: { type: 'string' },
       frames: { type: 'string' },
-      'max-side': { type: 'string' },
       strategy: { type: 'string' },
       'probe-fps': { type: 'string' },
       'target-fps': { type: 'string' },

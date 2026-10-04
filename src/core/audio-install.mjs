@@ -408,7 +408,7 @@ function spawnTar(args) {
  *
  * `modelArchive` is the way out when the host serving the weights is unreachable from here:
  * the file arrives by whatever means, and its sha256 is checked exactly as a download would be.
- * Mirrors `install_ocr {archive}`.
+ * The OCR engine installer, which offered the same escape hatch, is the dsh-ocr plugin now.
  *
  * @param {object} [options] - `{ force, onProgress, config, modelArchive }`.
  * @returns {Promise<object>} `{ installed, skipped, model, runtime, verify, state }`.

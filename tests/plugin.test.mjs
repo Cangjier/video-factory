@@ -47,12 +47,10 @@ test('normalizeConfig fills defaults and resolves the verified Ark base URL', ()
   assert.equal(config.pathBudget, 200)
   assert.equal(config.tts.voice, 'zh-CN-XiaoxiaoNeural')
   assert.equal(config.projectRoot, null)
-  // OCR is optional in every field: no engine installed still means a working plugin.
-  assert.equal(config.ocr.enginePath, null)
-  assert.equal(config.ocr.language, 'ch')
-  assert.equal(config.ocr.defaultEngine, 'auto')
-  assert.equal(config.ocr.maxSideLen, 1024)
-  assert.ok(config.ocr.timeoutMs > 0 && config.ocr.idleMs > 0, 'the engine needs a timeout and an idle release')
+  // Text recognition left for the dsh-ocr plugin, so there is no ocr config section any more:
+  // an unknown key is simply ignored rather than validated.
+  assert.equal(config.ocr, undefined)
+  assert.deepEqual(Object.keys(config).sort(), ['ark', 'ffmpegPath', 'ffprobePath', 'pathBudget', 'projectRoot', 'tts'])
 })
 
 test('normalizeConfig rejects wrong types instead of silently coercing', () => {
@@ -60,8 +58,7 @@ test('normalizeConfig rejects wrong types instead of silently coercing', () => {
   assert.throws(() => normalizeConfig({ projectRoot: 42 }), /projectRoot/)
   assert.throws(() => normalizeConfig({ ark: { pollIntervalSeconds: 'soon' } }), /pollIntervalSeconds/)
   assert.throws(() => normalizeConfig({ tts: { voice: [] } }), /voice/)
-  assert.throws(() => normalizeConfig({ ocr: { maxSideLen: 'big' } }), /maxSideLen/)
-  assert.throws(() => normalizeConfig({ ocr: { enginePath: 12 } }), /enginePath/)
+  assert.throws(() => normalizeConfig({ ffmpegPath: 12 }), /ffmpegPath/)
 })
 
 test('an invalid config registers nothing and says why', () => {
@@ -147,8 +144,6 @@ test('every action rejects missing input instead of returning an empty result', 
     ['video_render', 'finalize', /需要 "plan"|找不到时间线/],
     ['video_inspect', 'verify', /需要 "target"/],
     ['video_inspect', 'media', /需要 "target" 或 "paths"/],
-    ['video_inspect', 'ocr', /需要 "target"/],
-    ['video_inspect', 'find_text', /需要 "target"/],
     ['video_gen', 'generate', /需要 "prompt"|没有设置/],
     ['video_gen', 'image', /需要 "prompt"|没有设置/],
   ]
@@ -252,50 +247,34 @@ test('presets are reported and internally consistent', async () => {
   }
 })
 
-test('find_text asks for a needle before it touches the file', async () => {
+test('video_inspect carries no text recognition any more', async () => {
   const { ctx, registered } = fakeContext()
   apply(ctx, {})
   const inspect = registered.find((definition) => definition.name === 'video_inspect')
 
-  // The file exists but is not media, and no needle was given: the missing argument is the more
-  // useful complaint, so that is the one that must come back.
-  await assert.rejects(
-    () => inspect.execute({ action: 'find_text', target: 'package.json' }, { cwd: process.cwd() }),
-    /需要 "needle"/,
+  assert.deepEqual(
+    inspect.parameters.properties.action.enum,
+    ['verify', 'media'],
+    'reading text moved to the dsh-ocr plugin; this surface must not claim it',
   )
-  await assert.rejects(
-    () => inspect.execute({ action: 'find_text', target: 'no-such-shot.png', needle: '开始' }, { cwd: process.cwd() }),
-    /文件不存在/,
-  )
-  await assert.rejects(
-    () => inspect.execute({ action: 'ocr', target: 'package.json' }, { cwd: process.cwd() }),
-    /只支持图片和视频|文件不存在/,
-  )
-})
-
-test('ocr_status reports what the plugin can read with, without reading anything', async () => {
-  const { ctx, registered } = fakeContext()
-  apply(ctx, {})
-  const inspect = registered.find((definition) => definition.name === 'video_inspect')
-  const report = await inspect.execute({ action: 'ocr_status' }, { cwd: process.cwd() })
-
-  assert.equal(typeof report.available, 'boolean')
-  assert.ok(report.vendored, 'the vendored state must always be reported')
-  assert.equal(typeof report.prefer, 'string')
-  if (report.available) {
-    assert.ok(['rapidocr-json', 'paddleocr-json'].includes(report.kind))
-    assert.ok(report.executable.length > 0)
-  } else {
-    assert.match(report.note, /install_ocr/)
+  for (const action of ['ocr', 'find_text', 'ocr_status']) {
+    await assert.rejects(
+      () => inspect.execute({ action }, { cwd: process.cwd() }),
+      /unknown action/,
+      `${action} must not be reachable`,
+    )
   }
 })
 
-test('install_ocr refuses an unknown source instead of downloading something else', async () => {
+test('video_setup no longer provisions an OCR engine', async () => {
   const { ctx, registered } = fakeContext()
   apply(ctx, {})
-  const env = registered.find((definition) => definition.name === 'video_env')
+  const setup = registered.find((definition) => definition.name === 'video_setup')
+
+  assert.deepEqual(setup.parameters.properties.action.enum, ['install_ffmpeg', 'install_audio', 'install_matte'])
   await assert.rejects(
-    () => env.execute({ action: 'install_ocr', source: 'some-random-exe' }, { cwd: process.cwd() }),
-    /未知的 source/,
+    () => setup.execute({ action: 'install_ocr' }, { cwd: process.cwd() }),
+    /unknown action/,
+    'the engine installer moved to dsh-ocr text_setup {action:"install"}',
   )
 })

@@ -13,18 +13,13 @@ vendor/ffmpeg-*.zip
 vendor/*.zip
 vendor/*.7z
 
-# Vendored OCR engine: fetched by `video_env {action:"install_ocr"}`. 44 MB pruned, 95 MB whole,
-# and reproducible from a pinned release URL plus its sha256, so it is not tracked either.
-# vendor/ocr/SOURCE.json records what was installed and from where.
-vendor/ocr/
-
 # Vendored audio event model and inference runtime: fetched by
 # `video_env {action:"install_audio"}`. 28.4 MB, reproducible from pinned URLs — the model by
 # file sha256, the runtime by each npm tarball's published sha512 integrity.
 #
-# The whole directory is ignored, SOURCE.json included, for the same reason as OCR above: the
-# manifest describes what a given machine installed, and the pinned URLs plus hashes live in
-# src/core/audio-install.mjs, which is tracked. Regenerate with `install-audio`.
+# The whole directory is ignored, SOURCE.json included, because the manifest describes what a
+# given machine installed, and the pinned URLs plus hashes live in src/core/audio-install.mjs,
+# which is tracked. Regenerate with `install-audio`.
 vendor/audio/
 
 # Vendored matting model: fetched by `video_env {action:"install_matte"}`. 4.36 MB, and its
