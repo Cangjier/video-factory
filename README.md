@@ -62,13 +62,17 @@ DSH 决定做什么  →  video_* 工具确定性地执行
 
 ### ffmpeg
 
-仓库自带 `vendor/ffmpeg/bin/`（BtbN GPL 静态构建，含 libx264/libx265/libass）。换机器时：
+一份 ffmpeg 静态构建（含 libx264/libx265/libass），装在**共享目录** `~/.dsh-plugins/ffmpeg/bin/`。
+它不属于某个插件：`dsh-ffmpeg`、`dsh-ocr`、`dsh-tts`、`dsh-video-audio`、`video-factory` 读的是同一份，
+所以一个 200 MB 的构建在磁盘上只有一份。换机器时：
 
 ```
 video_setup {action: "install_ffmpeg"}
 ```
 
-或用命令行：`node src/bin/vf.mjs install`。发现顺序是 `VIDEO_FACTORY_FFMPEG` 环境变量 → `vendor/ffmpeg/bin/` → `PATH`。
+或用命令行：`node src/bin/vf.mjs install`。发现顺序是 `DSH_FFMPEG`（或 `VIDEO_FACTORY_FFMPEG`）环境变量
+→ `~/.dsh-plugins/ffmpeg/bin/` → 本插件 `vendor/ffmpeg/bin/`（旧位置）→ `PATH`，报告里的 `source`
+会说清哪一条命中。`DSH_PLUGIN_HOME` 可以把整个共享根换到别处（比如 D 盘）。
 
 ### 读图取字：已迁到 `dsh-ocr`（独立插件）
 
@@ -144,7 +148,7 @@ video_analyze {action: "audio_events", target: "out/final.mp4"}
 | 校验 | 模型按 **sha256**、运行时按 npm **sha512 integrity** 硬校验后才落盘；`install_audio` 幂等，已装且校验通过则跳过 |
 | 网络 | 自动走系统代理（见"踩过的坑"）。如果托管方完全不可达：`install_audio {archive:"D:/模型"}` 指向一个含 `yamnet.onnx` + `yamnet_class_map.csv` 的目录，或直接指向 `.onnx` 文件——**sha256 照样硬校验** |
 | 失败安全 | 模型先落到临时目录、校验通过才移入。下载中断**不会**破坏已装好的树（实测：两次 `fetch failed` 后 128/128 校验仍全绿） |
-| 删除 | `video_setup {action:"install_audio", remove: true}`（**会删掉整棵 `vendor/audio`，连带废掉抠像的共享运行时**） |
+| 删除 | `video_setup {action:"install_audio", remove: true}`（**会删掉共享目录里的 YAMNet 模型，连带删掉 `lib/onnxruntime-web`——抠像的运行时也在那里，抠像会一起不可用**） |
 | 不做 | **不建议商用前跳过来源核对**。模型来源链见下 |
 
 **为什么不用原生 `onnxruntime-node`**：它解包 **245.7 MB**（三平台 × 两架构的原生库），并且会打破本插件"纯 ESM、无依赖边"的性质。实测两条路径在同一个窗上**分数一致到小数点后六位**（0.977061 vs 0.977062），所以选了小的。
@@ -153,10 +157,10 @@ video_analyze {action: "audio_events", target: "out/final.mp4"}
 
 ```
 Google YAMNet（Apache-2.0，TF-Hub）
-  → jafet21/yamnetonnx → niobures/YAMNet → vendor/audio/yamnet/yamnet.onnx
+  → jafet21/yamnetonnx → niobures/YAMNet → ~/.dsh-plugins/models/yamnet/yamnet.onnx
 ```
 
-清单里记录的 sha256 是**首次落盘时的完整性锚点**，用于防篡改与复现，**不构成来源合法性证明**。完整溯源写在 `vendor/audio/SOURCE.json`。
+清单里记录的 sha256 是**首次落盘时的完整性锚点**，用于防篡改与复现，**不构成来源合法性证明**。完整溯源写在 `~/.dsh-plugins/models/yamnet/SOURCE.json`。
 
 ---
 
@@ -389,12 +393,19 @@ video_plan {action: "fields"}
 index.mjs              插件入口：apply / inject / 工具注册
 src/tools/*.mjs        工具 schema 与 action 实现（唯一知道 DSH 存在的层）
 src/core/*.mjs         确定性内核：纯 ESM、零第三方依赖、可离线单测
-vendor/ffmpeg/         静态 ffmpeg 构建
-vendor/audio/          YAMNet 模型 + WASM 推理运行时（可选；装之前 audio_events 不可用）
-vendor/matte/          U²-Net 抠像模型（可选；运行时与 vendor/audio 共用，不重复下载）
 ```
 
-读图取字的引擎目录 `vendor/ocr/` 已随能力一起搬到 `dsh-ocr`。
+静态依赖不在仓库里，在**共享目录** `~/.dsh-plugins`（六个插件共用；`DSH_PLUGIN_HOME` 可换根）：
+
+```
+~/.dsh-plugins/ffmpeg/bin/            一份 ffmpeg 静态构建，全家共用
+~/.dsh-plugins/models/yamnet/         YAMNet 模型 + 类别表（可选；装之前 audio_events 不可用）
+~/.dsh-plugins/models/u2netp/         U²-Net 抠像模型（可选）
+~/.dsh-plugins/lib/onnxruntime-web/   WASM 推理运行时（抠像与音频事件共用，只装一次）
+vendor/ffmpeg/  vendor/audio/  vendor/matte/   旧位置，仍然读（装过就不用搬）
+```
+
+读图取字的引擎目录已经随能力一起搬到 `dsh-ocr`，它装在 `~/.dsh-plugins/ocr/`。
 
 **内核不依赖 DSH**，所以"确定性"可离线证明。渲染分四阶段，每阶段独立可调、独立缓存：
 

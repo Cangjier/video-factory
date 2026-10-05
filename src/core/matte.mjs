@@ -29,6 +29,7 @@ import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { PLUGIN_ROOT } from './env.mjs'
+import { SHARED_MATTE_DIR } from './home.mjs'
 import { resolveTool } from './ffmpeg.mjs'
 import { toFfmpegColor } from './filter.mjs'
 import { resolveMatteRuntime, runtimeInstallHint } from './matte-runtime.mjs'
@@ -41,11 +42,36 @@ export class MatteError extends Error {
   }
 }
 
-/** Where the matting model lives. */
-export const MATTE_VENDOR_DIR = join(PLUGIN_ROOT, 'vendor', 'matte')
+/**
+ * Where the matting model is *installed*: the shared plugin home, beside the other models, so a
+ * machine that renders video and one that only runs audio events do not each download a copy.
+ */
+export const MATTE_VENDOR_DIR = SHARED_MATTE_DIR
 
-/** The model file. */
-export const MATTE_MODEL = join(MATTE_VENDOR_DIR, 'u2netp.onnx')
+/** The legacy per-checkout location, still read when the shared home is empty. */
+export const LEGACY_MATTE_DIR = join(PLUGIN_ROOT, 'vendor', 'matte')
+
+/**
+ * Where the model is actually read from.
+ *
+ * The shared home when it holds a model, otherwise a copy left in this checkout's `vendor/matte`
+ * by an install that predates the shared home, otherwise the shared home — the place an install
+ * is about to create.
+ *
+ * @returns {{directory: string, model: string, source: 'home'|'vendor'}} the resolved location.
+ */
+export function resolveMatteModel() {
+  if (existsSync(join(MATTE_VENDOR_DIR, 'u2netp.onnx'))) {
+    return { directory: MATTE_VENDOR_DIR, model: join(MATTE_VENDOR_DIR, 'u2netp.onnx'), source: 'home' }
+  }
+  if (existsSync(join(LEGACY_MATTE_DIR, 'u2netp.onnx'))) {
+    return { directory: LEGACY_MATTE_DIR, model: join(LEGACY_MATTE_DIR, 'u2netp.onnx'), source: 'vendor' }
+  }
+  return { directory: MATTE_VENDOR_DIR, model: join(MATTE_VENDOR_DIR, 'u2netp.onnx'), source: 'home' }
+}
+
+/** The model file. Resolves to wherever the installed copy is. */
+export const MATTE_MODEL = resolveMatteModel().model
 
 /** Scratch directory for decoded frames and generated masks. */
 export const MATTE_TMP_DIR = join(PLUGIN_ROOT, 'tmp', 'matte')
@@ -95,18 +121,22 @@ export function matteState() {
   // Resolved on every call rather than at import: the runtime can be installed (by the sibling
   // plugin) while this process is running, and a cached "missing" would then be wrong forever.
   const runtime = resolveMatteRuntime()
-  const model = existsSync(MATTE_MODEL)
+  const location = resolveMatteModel()
+  const model = existsSync(location.model)
   const runtimePresent = runtime.source !== 'missing'
   const missing = []
   if (!model) missing.push('model')
   if (!runtimePresent) missing.push('runtime')
 
   let bytes = null
-  if (model) bytes = statSync(MATTE_MODEL).size
+  if (model) bytes = statSync(location.model).size
 
   return {
     available: missing.length === 0,
     model,
+    modelPath: location.model,
+    modelDir: location.directory,
+    modelSource: location.source,
     runtime: runtimePresent,
     runtimeDir: runtime.dir,
     runtimeSource: runtime.source,
@@ -145,10 +175,10 @@ export async function loadMatteSession() {
       wasm: pathToFileURL(runtime.binary).href,
       // The threaded loader must be named explicitly, because it is resolved relative to the
       // document by default and this process has no document.
-      mjs: pathToFileURL(join(runtime.dir, 'runtime', 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.mjs')).href,
+      mjs: pathToFileURL(join(runtime.packageDir, 'dist', 'ort-wasm-simd-threaded.mjs')).href,
     }
 
-    const session = await ort.InferenceSession.create(readFileSync(MATTE_MODEL), {
+    const session = await ort.InferenceSession.create(readFileSync(state.modelPath ?? MATTE_MODEL), {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
     })

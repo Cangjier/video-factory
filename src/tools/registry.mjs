@@ -149,11 +149,12 @@ export const REGISTRY = {
           'it does not install: if ffmpeg is missing it says so, and video_setup installs it. It also does not report desktop input or text recognition: those are separate plugins (computer_*, text_*).',
         required: [],
         returns:
-          '{ ok, problems[], ffmpeg{path, version, encoders[], filters[]}, ffprobe, vendored, matte{available, runtime, runtimeDir, runtimeSource, ...}, arkKeyPresent, ttsReachable } — a missing encoder or filter appears in problems and it names it.',
+          '{ ok, problems[], ffmpeg{path, version, source, encoders[], filters[]}, ffprobe, vendored, shared, matte{available, runtime, runtimeDir, runtimeSource, ...}, arkKeyPresent, ttsReachable } — a missing encoder or filter appears in problems and it names it.',
         cost: 'about a second: three short process launches, no network, no disk writes, and nothing on the desktop is touched.',
         gotchas: [
           'problems is the field to read: ok alone does not say *what* is missing.',
           'An absent ARK key disables only video_gen; everything else keeps working.',
+          'ffmpeg.source says which rule answered — "home" is the shared plugin home (~/.dsh-plugins/ffmpeg/bin) that all six plugins install into and read from, so a render does not depend on which checkout happens to be beside this one.',
           'Reading the state of the matting component is file inspection only: it starts no engine and moves nothing. Sound is not reported here at all — ask audio_setup {action:"status"} in the separate dsh-video-audio plugin.',
         ],
         example: { action: 'probe' },
@@ -206,27 +207,27 @@ export const REGISTRY = {
     ],
     actions: {
       install_ffmpeg: {
-        summary: 'download the pinned ffmpeg static release and unpack ffmpeg/ffprobe/ffplay into vendor/ffmpeg/bin, then report the version it landed on.',
+        summary: 'download the pinned ffmpeg static release and unpack ffmpeg/ffprobe/ffplay into the shared plugin home (~/.dsh-plugins/ffmpeg/bin), then report the version it landed on.',
         use: 'when video_env {action:"probe"} reports ffmpeg or ffprobe missing, or missing libx264/aac.',
-        avoid: 'the plugin finds ffmpeg through VIDEO_FACTORY_FFMPEG, then vendor/ffmpeg/bin, then PATH; install only when all three fail.',
+        avoid: 'the plugin finds ffmpeg through DSH_FFMPEG (or VIDEO_FACTORY_FFMPEG), then ~/.dsh-plugins/ffmpeg/bin, then vendor/ffmpeg/bin, then PATH; install only when all of those fail. It is the same directory dsh-ffmpeg, dsh-ocr, dsh-tts and dsh-video-audio read, so one install serves every plugin.',
         required: [],
-        returns: '{ directory, version, reused, bytes, state } — state is the resolved vendored build.',
+        returns: '{ directory, version, reused, bytes, state } — state is the resolved build, with `location` saying whether it came from the shared home or a legacy vendor/ffmpeg.',
         cost: 'a few hundred megabytes over the network, a minute or two.',
         gotchas: [
-          'The reuse test is only "vendor/ffmpeg/bin exists", so an empty or half-unpacked directory makes every later call skip the install while ffmpeg is still missing; pass force, or delete the directory, to recover.',
+          'The reuse test is only "a binary directory exists", so an empty or half-unpacked directory makes every later call skip the install while ffmpeg is still missing; pass force, or delete the directory, to recover.',
           'It does not verify a pinned digest, unlike the model installers, and it accepts neither archive nor remove: there is no uninstall action for ffmpeg.',
-          'The extracted layout is what keeps intermediate paths inside the Windows path budget; do not relocate it by hand.',
+          'The extracted layout is what keeps intermediate paths inside the Windows path budget; do not relocate it by hand. Set DSH_PLUGIN_HOME to move the whole shared home somewhere else.',
         ],
         example: { action: 'install_ffmpeg' },
         seeAlso: ['video_env'],
       },
       install_matte: {
-        summary: 'download the pinned 4.36MB U²-Net model into vendor/matte/ so a subject can be cut out of a backdrop that is not a flat colour, or remove it.',
+        summary: 'download the pinned 4.36MB U²-Net model into the shared plugin home (~/.dsh-plugins/models/u2netp) so a subject can be cut out of a backdrop that is not a flat colour, or remove it.',
         use: 'when a subject must be cut from a photographic or busy background.',
         avoid: 'a green screen should use the plan-level chroma_key instead: it is exact and about two thousand times cheaper than a learned matte.',
         required: [],
         returns: '{ directory, reused, bytes, state, verify }',
-        cost: '4.36MB; the inference runtime is the one dsh-video-audio installed and is never fetched twice.',
+        cost: '4.36MB; the inference runtime is the one dsh-video-audio installed in the shared home and is never fetched twice.',
         gotchas: [
           'The runtime is a hard prerequisite and part of the skip test: with no runtime this refuses before downloading, naming audio_setup {action:"install"} in the sibling plugin, rather than spending 4.36MB on a model that could not load.',
           'remove deletes the model only and leaves the shared runtime alone, so matting can be removed without touching audio event detection.',

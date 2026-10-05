@@ -8,7 +8,38 @@
  *
  * @module video-factory/core
  */
-export { PLUGIN_ROOT, resolveCwd, resolveBinary, versionOf, capabilitiesOf, vendoredBuild, fontDirectories } from './env.mjs'
+export {
+  FFMPEG_ENV,
+  FFPROBE_ENV,
+  LEGACY_FFMPEG_ENV,
+  LEGACY_FFPROBE_ENV,
+  PLUGIN_ROOT,
+  capabilitiesOf,
+  findBinary,
+  fontDirectories,
+  installLocation,
+  resolveBinary,
+  resolveCwd,
+  vendoredBuild,
+  versionOf,
+} from './env.mjs'
+
+export {
+  HOME_DIR_NAME,
+  HOME_ENV,
+  SHARED_FFMPEG_BIN,
+  SHARED_FFMPEG_DIR,
+  SHARED_LIB_DIR,
+  SHARED_MATTE_DIR,
+  SHARED_MODELS_DIR,
+  SHARED_OCR_DIR,
+  SHARED_ROOT,
+  SHARED_RUNTIME_DIR,
+  SHARED_YAMNET_DIR,
+  binaryName,
+  sharedHomeState,
+  sharedPath,
+} from './home.mjs'
 
 export {
   FFmpegError,
@@ -201,6 +232,7 @@ export {
 
 export {
   DEFAULT_MASK_FPS,
+  LEGACY_MATTE_DIR,
   MATTE_MODEL,
   MATTE_MODEL_SPEC,
   MATTE_SIDE,
@@ -220,6 +252,7 @@ export {
   matteVideo,
   normaliseMask,
   planMasks,
+  resolveMatteModel,
   writeMaskPng,
 } from './matte.mjs'
 

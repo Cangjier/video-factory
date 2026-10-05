@@ -1,13 +1,16 @@
 /**
  * Provisioning the matting model.
  *
- * One file, 4.36 MB, pinned by SHA-256 — the same shape as the other two installers. The
- * inference runtime is deliberately **not** re-fetched here. It used to be vendored by
+ * One file, 4.36 MB, pinned by SHA-256 — the same shape as the other installers, and written to
+ * **the shared plugin home** (`~/.dsh-plugins/models/u2netp/`) rather than into this checkout, so
+ * the model sits beside YAMNet and survives the checkout being moved or reinstalled.
+ *
+ * The inference runtime is deliberately **not** re-fetched here. It used to be vendored by
  * `install_audio`, which lived in this plugin; both that action and the runtime moved to the
- * separate `dsh-video-audio` plugin (see {@link module:video-factory/core/matte-runtime}). Matting
- * still shares it rather than duplicating 13 MB, so `matteState` and this installer both report a
- * missing runtime by naming the plugin that owns it — and refuse before downloading a model that
- * could not then be loaded.
+ * separate `dsh-video-audio` plugin (see {@link module:video-factory/core/matte-runtime}), which
+ * now installs it into `~/.dsh-plugins/lib/onnxruntime-web`. Matting still shares it rather than
+ * duplicating 13 MB, so `matteState` and this installer both report a missing runtime by naming
+ * the plugin that owns it — and refuse before downloading a model that could not then be loaded.
  *
  * The provenance chain is a single personal re-upload of an Apache-2.0 model, so the recorded
  * hash is a tamper-detection and reproducibility anchor, exactly as with YAMNet — not evidence
@@ -21,14 +24,15 @@ import { join, resolve } from 'node:path'
 import { download } from './install.mjs'
 import { runtimeInstallHint } from './matte-runtime.mjs'
 import {
-  MATTE_MODEL,
+  LEGACY_MATTE_DIR,
   MATTE_MODEL_SPEC,
   MATTE_VENDOR_DIR,
   MatteError,
   matteState,
+  resolveMatteModel,
 } from './matte.mjs'
 
-/** Scratch directory for the download. */
+/** Scratch directory for the download. Inside the install target, so a partial file cannot be read as the model. */
 export const MATTE_SCRATCH_DIR = join(MATTE_VENDOR_DIR, '.download')
 
 /** The manifest recording what was installed and from where. */
@@ -60,37 +64,46 @@ export function matteInstallState() {
   return {
     ...state,
     manifest,
-    installedBytes: state.model ? statSync(MATTE_MODEL).size : 0,
+    installedBytes: state.model && state.modelPath ? statSync(state.modelPath).size : 0,
   }
 }
 
 /**
- * Verify the installed model against its pin.
- * @returns {{checked: number, ok: boolean, expected: string, actual: string|null}} the verdict.
+ * Verify the installed model against its pin, wherever it was found.
+ * @returns {{checked: number, ok: boolean, expected: string, actual: string|null, path: string, source: string}} the verdict.
  */
 export function verifyInstalledMatte() {
-  if (!existsSync(MATTE_MODEL)) {
-    return { checked: 0, ok: false, expected: MATTE_MODEL_SPEC.sha256, actual: null }
+  const location = resolveMatteModel()
+  if (!existsSync(location.model)) {
+    return { checked: 0, ok: false, expected: MATTE_MODEL_SPEC.sha256, actual: null, path: location.model, source: location.source }
   }
-  const actual = sha256File(MATTE_MODEL)
-  return { checked: 1, ok: actual === MATTE_MODEL_SPEC.sha256, expected: MATTE_MODEL_SPEC.sha256, actual }
+  const actual = sha256File(location.model)
+  return {
+    checked: 1,
+    ok: actual === MATTE_MODEL_SPEC.sha256,
+    expected: MATTE_MODEL_SPEC.sha256,
+    actual,
+    path: location.model,
+    source: location.source,
+  }
 }
 
 /**
- * Write the provenance manifest for the model on disk.
+ * Write the provenance manifest for the model in the shared home.
  * @returns {object} the manifest that was written.
  */
 export function writeMatteManifest() {
+  const model = join(MATTE_VENDOR_DIR, 'u2netp.onnx')
   const manifest = {
     model: { ...MATTE_MODEL_SPEC },
-    files: existsSync(MATTE_MODEL)
-      ? [{ path: 'u2netp.onnx', bytes: statSync(MATTE_MODEL).size, sha256: sha256File(MATTE_MODEL) }]
-      : [],
+    directory: MATTE_VENDOR_DIR,
+    files: existsSync(model) ? [{ path: 'u2netp.onnx', bytes: statSync(model).size, sha256: sha256File(model) }] : [],
     runtime: {
       shared: true,
+      home: '~/.dsh-plugins/lib/onnxruntime-web',
       note:
-        '推理运行时由独立插件 dsh-video-audio 提供（它自己的 vendor/audio/runtime，' +
-        '旧机器上可能还在本仓库的 vendor/audio/runtime），抠图与音频事件检测共用，不重复下载。',
+        '推理运行时由独立插件 dsh-video-audio 提供，装在共享目录 lib/onnxruntime-web，' +
+        '抠图与音频事件检测共用，不重复下载；旧机器上也可能还在某个检出的 vendor/audio/runtime。',
     },
     recordedAt: new Date().toISOString(),
   }
@@ -100,7 +113,7 @@ export function writeMatteManifest() {
 }
 
 /**
- * Install the matting model.
+ * Install the matting model into the shared home.
  *
  * Idempotent, and safe against a partial download: the file lands in the scratch directory, is
  * hashed there, and only replaces the model once it matches. `modelArchive` points at a
@@ -145,9 +158,12 @@ export async function installMatte(options = {}) {
     : null
   if (local !== null && !existsSync(local)) throw new MatteError(`modelArchive 指向的文件不存在：${local}`)
 
+  mkdirSync(MATTE_VENDOR_DIR, { recursive: true })
   mkdirSync(MATTE_SCRATCH_DIR, { recursive: true })
   const staged = join(MATTE_SCRATCH_DIR, 'u2netp.onnx')
   rmSync(staged, { force: true })
+
+  const target = join(MATTE_VENDOR_DIR, 'u2netp.onnx')
 
   try {
     if (local !== null) {
@@ -166,9 +182,8 @@ export async function installMatte(options = {}) {
       )
     }
 
-    mkdirSync(MATTE_VENDOR_DIR, { recursive: true })
-    writeFileSync(MATTE_MODEL, readFileSync(staged))
-    onProgress(`  u2netp.onnx 校验通过（${(statSync(MATTE_MODEL).size / 1024 / 1024).toFixed(2)} MB）`)
+    writeFileSync(target, readFileSync(staged))
+    onProgress(`  u2netp.onnx 校验通过（${(statSync(target).size / 1024 / 1024).toFixed(2)} MB）`)
   } finally {
     // Whether it matched, failed the hash, or the network died mid-stream, a partial file must
     // not survive: a stale one would be silently reused as the next attempt's target.
@@ -182,29 +197,40 @@ export async function installMatte(options = {}) {
   if (state.runtime === false) {
     onProgress(`模型已就位，但推理运行时缺失。${runtimeInstallHint()}`)
   } else {
-    onProgress(`完成：${(manifest.files[0]?.bytes / 1024 / 1024).toFixed(2)} MB（运行时共用，不重复下载）`)
+    onProgress(`完成：${(manifest.files[0]?.bytes / 1024 / 1024).toFixed(2)} MB → ${MATTE_VENDOR_DIR}（运行时共用，不重复下载）`)
   }
 
   return { installed: true, skipped: false, verify, state, manifest }
 }
 
 /**
- * Remove the vendored matting model.
+ * Remove the shared matting model.
  *
- * Only this model is removed. The shared WASM runtime under `vendor/audio` belongs to
- * `install_audio` and is left alone, because deleting it here would silently break audio event
+ * Only `models/u2netp` is removed. The shared WASM runtime under `lib/onnxruntime-web` belongs to
+ * `dsh-video-audio` and is left alone, because deleting it here would silently break audio event
  * detection as a side effect of removing a matting model.
  *
- * @param {{onProgress?: (line: string) => void}} [options] - progress callback.
- * @returns {{removed: boolean, directory: string, keptRuntime: boolean}} the outcome.
+ * @param {{onProgress?: (line: string) => void, removeLegacy?: boolean}} [options] - progress callback; `removeLegacy` also clears the pre-shared-home copy.
+ * @returns {{removed: boolean, directory: string, keptRuntime: boolean, removedLegacy: boolean}} the outcome.
  */
 export function removeMatte(options = {}) {
   const onProgress = options.onProgress ?? (() => {})
-  if (!existsSync(MATTE_VENDOR_DIR)) {
-    onProgress('没有已安装的抠图模型可供删除。')
-    return { removed: false, directory: MATTE_VENDOR_DIR, keptRuntime: true }
+  let removed = false
+
+  if (existsSync(MATTE_VENDOR_DIR)) {
+    rmSync(MATTE_VENDOR_DIR, { recursive: true, force: true })
+    removed = true
+    onProgress(`已删除 ${MATTE_VENDOR_DIR}（共享运行时 lib/onnxruntime-web 保留，音频事件检测不受影响）`)
+  } else {
+    onProgress('共享目录里没有已安装的抠图模型。')
   }
-  rmSync(MATTE_VENDOR_DIR, { recursive: true, force: true })
-  onProgress(`已删除 ${MATTE_VENDOR_DIR}（vendor/audio 的共享运行时保留，音频事件检测不受影响）`)
-  return { removed: true, directory: MATTE_VENDOR_DIR, keptRuntime: true }
+
+  let removedLegacy = false
+  if (options.removeLegacy === true && existsSync(LEGACY_MATTE_DIR)) {
+    rmSync(LEGACY_MATTE_DIR, { recursive: true, force: true })
+    removedLegacy = true
+    onProgress(`已删除旧位置 ${LEGACY_MATTE_DIR}`)
+  }
+
+  return { removed, directory: MATTE_VENDOR_DIR, keptRuntime: true, removedLegacy }
 }

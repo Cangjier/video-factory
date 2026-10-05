@@ -8,7 +8,7 @@
  * @module video-factory/tools/env-actions
  */
 import { resolve } from 'node:path'
-import { resolveBinary, capabilitiesOf, versionOf, vendoredBuild } from '../core/index.mjs'
+import { capabilitiesOf, findBinary, versionOf, vendoredBuild } from '../core/index.mjs'
 import { InstallError, installFfmpeg, vendoredState } from '../core/install.mjs'
 import { matteState } from '../core/matte.mjs'
 import { installMatte, removeMatte, verifyInstalledMatte } from '../core/matte-install.mjs'
@@ -43,14 +43,17 @@ export function createEnvActions(config, logger) {
      */
     async probe() {
       const problems = []
-      const ffmpeg = resolveBinary('ffmpeg', config.ffmpegPath)
-      const ffprobe = resolveBinary('ffprobe', config.ffprobePath)
+      const ffmpegFound = findBinary('ffmpeg', config.ffmpegPath)
+      const ffprobeFound = findBinary('ffprobe', config.ffprobePath)
+      const ffmpeg = ffmpegFound?.path ?? null
+      const ffprobe = ffprobeFound?.path ?? null
 
       const report = {
         ok: true,
-        ffmpeg: ffmpeg === null ? { found: false } : { found: true, path: ffmpeg },
-        ffprobe: ffprobe === null ? { found: false } : { found: true, path: ffprobe },
+        ffmpeg: ffmpeg === null ? { found: false } : { found: true, path: ffmpeg, source: ffmpegFound.source },
+        ffprobe: ffprobe === null ? { found: false } : { found: true, path: ffprobe, source: ffprobeFound.source },
         vendored: vendoredBuild(),
+        shared: vendoredBuild().shared,
         node: process.version,
         platform: `${process.platform} ${process.arch}`,
         presets: Object.keys(PRESETS),
@@ -76,7 +79,10 @@ export function createEnvActions(config, logger) {
       }
 
       if (ffmpeg === null) {
-        problems.push('找不到 ffmpeg。请设置 VIDEO_FACTORY_FFMPEG，或把它放到 vendor/ffmpeg/bin/，或让它出现在 PATH 里。')
+        problems.push(
+          `找不到 ffmpeg。请设置 DSH_FFMPEG（或 VIDEO_FACTORY_FFMPEG），或把构建放进共享目录 ${vendoredBuild().shared.sharedRoot}/ffmpeg/bin，` +
+            '或让它出现在 PATH 里；也可以运行 video_setup {action:"install_ffmpeg"} 装一份。',
+        )
       }
       if (ffprobe === null) {
         problems.push('找不到 ffprobe。两者必须成对可用：装配阶段依赖 ffprobe 检查流信息。')

@@ -39,7 +39,7 @@ export function createSetupTool(available) {
       force: {
         type: 'boolean',
         description:
-          'install_ffmpeg / install_matte: reinstall even when a copy is already present. For ffmpeg this is also the only way out of a half-unpacked vendor/ffmpeg/bin directory, which otherwise makes every later call skip the install.',
+          'install_ffmpeg / install_matte: reinstall even when a copy is already present. For ffmpeg this is also the only way out of a half-unpacked binary directory in the shared home, which otherwise makes every later call skip the install.',
       },
       archive: {
         type: 'string',
@@ -48,7 +48,8 @@ export function createSetupTool(available) {
       },
       remove: {
         type: 'boolean',
-        description: 'install_matte: remove the matting model instead of installing it. There is no removal for ffmpeg.',
+        description:
+          'install_matte: remove the matting model instead of installing it — it deletes ~/.dsh-plugins/models/u2netp and leaves the shared ONNX runtime alone. There is no removal for ffmpeg.',
       },
       cwd: CWD_PROPERTY,
     },

@@ -69,8 +69,9 @@ export function resolveTool(stem, config = {}) {
   const found = resolveBinary(stem, configured ?? null)
   if (found === null) {
     throw new FFmpegNotFound(
-      `找不到 ${stem}。请设置 ${stem === 'ffmpeg' ? 'VIDEO_FACTORY_FFMPEG' : 'VIDEO_FACTORY_FFPROBE'}，` +
-        `或把它放到 vendor/ffmpeg/bin/，或让它出现在 PATH 里。` +
+      `找不到 ${stem}。请设置 ${stem === 'ffmpeg' ? 'DSH_FFMPEG' : 'DSH_FFPROBE'}（或 ${stem === 'ffmpeg' ? 'VIDEO_FACTORY_FFMPEG' : 'VIDEO_FACTORY_FFPROBE'}），` +
+        `或把它放到共享目录 ~/.dsh-plugins/ffmpeg/bin（video_setup {action:"install_ffmpeg"} 会装到这里），` +
+        `或让它出现在 PATH 里。` +
         `（ffmpeg 与 ffprobe 必须成对可用：装配阶段依赖 ffprobe 检查流信息。）`,
     )
   }

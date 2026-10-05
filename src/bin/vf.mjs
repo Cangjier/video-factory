@@ -90,7 +90,7 @@ const COMMANDS = {
     return report.ok ? 0 : 1
   },
 
-  /** Install ffmpeg into vendor/. */
+  /** Install ffmpeg into the shared plugin home. */
   async install(options) {
     const result = await installFfmpeg({
       force: options.force === true,
@@ -330,13 +330,14 @@ async function main() {
 
 命令：
   doctor                             检查 ffmpeg / ffprobe、抠图模型与云端 Key
-  install [--force]                  把 ffmpeg 装进 vendor/
+  install [--force]                  把 ffmpeg 装进共享目录 ~/.dsh-plugins/ffmpeg/bin
+                                     （六个插件共用一份；DSH_PLUGIN_HOME 可改根目录）
   frames <视频> [--strategy adaptive|uniform|scene_change|motion_aware]
              [--probe-fps 4] [--scene-threshold 30] [--motion-threshold 5] [--json]
                                        自适应抽帧：找剪切点与运动，报出每帧的选中理由与分值
   install-matte [--force] [--archive <本地.onnx>] [--remove]
-                                       把 U²-Net 抠图模型装进 vendor/matte/
-                                       （推理运行时由独立插件 dsh-video-audio 提供）
+                                       把 U²-Net 抠图模型装进共享目录 ~/.dsh-plugins/models/u2netp
+                                       （推理运行时由独立插件 dsh-video-audio 提供，装在共享目录 lib/）
   matte <图片|视频> [--at <秒>] [--feather <像素>] [--out <png>] [--keep-mask] [--json]
                                        抠出主体，输出透明背景 PNG（单帧约 2 秒）
   scan <目录> [--json] [--no-dedupe] 盘点素材

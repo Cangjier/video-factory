@@ -1,26 +1,39 @@
 /**
  * Environment facts: where the plugin lives, and whether its external tools exist.
  *
- * Binary discovery follows the same precedence the reference implementation used —
- * explicit override, then the vendored build, then PATH — because a vendored
- * ffmpeg is what makes a render reproducible across machines while a PATH ffmpeg
- * keeps a fresh clone working.
+ * Binary discovery follows one order everywhere in this family: an explicit configured path, then
+ * the plugin's environment variable, then **the shared plugin home** (`~/.dsh-plugins/ffmpeg/bin`,
+ * one build for all six plugins), then the legacy `vendor/ffmpeg/bin`, then PATH. The shared home
+ * is what makes a render reproducible across machines without six copies of the same 200 MB, and
+ * the `vendor/` directory stays as a candidate so a machine that installed a build before the
+ * shared home existed does not download it again.
  *
  * @module video-factory/core/env
  */
 import { existsSync, readdirSync } from 'node:fs'
 import { execFile } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
+import { PLUGIN_ROOT, SHARED_FFMPEG_BIN, SHARED_FFMPEG_DIR, binaryName, sharedHomeState } from './home.mjs'
 
 const run = promisify(execFile)
 
-/** Plugin package root, resolved from this module so a `link:` install still works. */
-export const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+export { PLUGIN_ROOT }
 
-const BINARY_NAME = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-const PROBE_NAME = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
+/** Environment variable that names an ffmpeg executable outright, shared with the other plugins. */
+export const FFMPEG_ENV = 'DSH_FFMPEG'
+
+/** Environment variable that names an ffprobe executable outright, shared with the other plugins. */
+export const FFPROBE_ENV = 'DSH_FFPROBE'
+
+/** This plugin's own environment variable, kept because it was documented first. */
+export const LEGACY_FFMPEG_ENV = 'VIDEO_FACTORY_FFMPEG'
+
+/** The matching ffprobe variable. */
+export const LEGACY_FFPROBE_ENV = 'VIDEO_FACTORY_FFPROBE'
+
+const BINARY_NAME = binaryName('ffmpeg')
+const PROBE_NAME = binaryName('ffprobe')
 
 /**
  * Resolve the working directory for one request.
@@ -36,18 +49,32 @@ export function resolveCwd(config, requested) {
 }
 
 /**
- * Locate one binary: explicit config, then the vendored build, then PATH.
+ * Locate one binary and say which rule produced it.
  *
  * @param {string} stem - `ffmpeg` or `ffprobe`.
  * @param {string|null} explicit - a configured path.
- * @returns {string|null} an existing absolute path, or null when none is found.
+ * @returns {{path: string, source: 'config'|'env'|'home'|'vendor'|'path'}|null} where it was found, or null.
  */
-export function resolveBinary(stem, explicit) {
-  if (typeof explicit === 'string' && explicit.trim() !== '' && existsSync(explicit)) return resolve(explicit)
+export function findBinary(stem, explicit) {
+  if (typeof explicit === 'string' && explicit.trim() !== '' && existsSync(explicit)) {
+    return { path: resolve(explicit), source: 'config' }
+  }
 
   const name = stem === 'ffmpeg' ? BINARY_NAME : PROBE_NAME
+  const envNames =
+    stem === 'ffmpeg' ? [FFMPEG_ENV, LEGACY_FFMPEG_ENV] : [FFPROBE_ENV, LEGACY_FFPROBE_ENV]
+  for (const variable of envNames) {
+    const value = process.env[variable]
+    if (typeof value === 'string' && value.trim() !== '' && existsSync(value)) {
+      return { path: resolve(value), source: 'env' }
+    }
+  }
+
+  const shared = join(SHARED_FFMPEG_BIN, name)
+  if (existsSync(shared)) return { path: shared, source: 'home' }
+
   const vendored = join(PLUGIN_ROOT, 'vendor', 'ffmpeg', 'bin', name)
-  if (existsSync(vendored)) return vendored
+  if (existsSync(vendored)) return { path: vendored, source: 'vendor' }
 
   // PATH lookup without spawning a shell: `where`/`which` is one place to handle
   // both platforms, and a missing binary simply reports not found.
@@ -55,9 +82,21 @@ export function resolveBinary(stem, explicit) {
   for (const entry of pathEntries) {
     if (entry.trim() === '') continue
     const candidate = join(entry, name)
-    if (existsSync(candidate)) return candidate
+    if (existsSync(candidate)) return { path: candidate, source: 'path' }
   }
   return null
+}
+
+/**
+ * Locate one binary: explicit config, then the environment, then the shared home, then the legacy
+ * vendor directory, then PATH.
+ *
+ * @param {string} stem - `ffmpeg` or `ffprobe`.
+ * @param {string|null} explicit - a configured path.
+ * @returns {string|null} an existing absolute path, or null when none is found.
+ */
+export function resolveBinary(stem, explicit) {
+  return findBinary(stem, explicit)?.path ?? null
 }
 
 /**
@@ -117,15 +156,35 @@ export async function capabilitiesOf(binary) {
 }
 
 /**
- * Report whether the vendored ffmpeg build is present, without running anything.
- * @returns {{present: boolean, directory: string, files: string[]}} vendored build facts.
+ * Which directory this plugin's build is read from and installed into.
+ *
+ * The shared home when it holds a build, otherwise the legacy `vendor/ffmpeg` when that one does,
+ * otherwise the shared home — the place an install is about to create.
+ *
+ * @returns {{directory: string, binDir: string, source: 'home'|'vendor'}} the resolved install location.
+ */
+export function installLocation() {
+  for (const candidate of [
+    { directory: SHARED_FFMPEG_DIR, binDir: SHARED_FFMPEG_BIN, source: 'home' },
+    { directory: join(PLUGIN_ROOT, 'vendor', 'ffmpeg'), binDir: join(PLUGIN_ROOT, 'vendor', 'ffmpeg', 'bin'), source: 'vendor' },
+  ]) {
+    if (existsSync(join(candidate.binDir, BINARY_NAME)) || existsSync(join(candidate.binDir, PROBE_NAME))) return candidate
+  }
+  return { directory: SHARED_FFMPEG_DIR, binDir: SHARED_FFMPEG_BIN, source: 'home' }
+}
+
+/**
+ * Report whether a build is present, without running anything.
+ *
+ * @returns {{present: boolean, directory: string, binDir: string, source: 'home'|'vendor', files: string[], shared: object}} build facts.
  */
 export function vendoredBuild() {
-  const directory = join(PLUGIN_ROOT, 'vendor', 'ffmpeg', 'bin')
-  if (!existsSync(directory)) return { present: false, directory, files: [] }
+  const location = installLocation()
+  const base = { directory: location.directory, binDir: location.binDir, source: location.source, shared: sharedHomeState() }
+  if (!existsSync(location.binDir)) return { present: false, ...base, files: [] }
   try {
-    return { present: true, directory, files: readdirSync(directory) }
+    return { present: true, ...base, files: readdirSync(location.binDir) }
   } catch {
-    return { present: true, directory, files: [] }
+    return { present: true, ...base, files: [] }
   }
 }
